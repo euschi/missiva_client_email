@@ -39,6 +39,12 @@ export const api = {
   openAttachment: (m: Message, index: number): Promise<string> =>
     inTauri ? invoke("open_attachment", { target: ref(m), index }) : Promise.resolve(m.attachments[index]?.name ?? ""),
 
+  clearCache: (): Promise<void> => (inTauri ? invoke("clear_cache") : Promise.resolve()),
+
+  trayAvailable: (): Promise<boolean> => (inTauri ? invoke("tray_available") : Promise.resolve(false)),
+
+  setTrayUnread: (count: number): Promise<void> => (inTauri ? invoke("set_tray_unread", { count }) : Promise.resolve()),
+
   pickFiles: async (): Promise<string[]> => {
     if (!inTauri) return [];
     const picked = await open({ multiple: true, title: "Allega file" });

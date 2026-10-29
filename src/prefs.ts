@@ -9,6 +9,13 @@ export interface Prefs {
   customHex: string;
   reader: Reader;
   density: Density;
+  /** Notifica di sistema per i nuovi messaggi in arrivo. */
+  notify: boolean;
+  /** Mostra mittente e oggetto nella notifica. */
+  notifyPreview: boolean;
+  /** Chiudere la finestra la nasconde nell'area di notifica. */
+  closeToTray: boolean;
+  markReadOnOpen: boolean;
 }
 
 export const PRESETS = [
@@ -22,7 +29,16 @@ export const PRESETS = [
   { id: "system", label: "Sistema", hex: "#78AEED" },
 ];
 
-export const DEFAULT_PREFS: Prefs = { accentId: "lime", customHex: "#E8A0FF", reader: "paper", density: "comfortable" };
+export const DEFAULT_PREFS: Prefs = {
+  accentId: "lime",
+  customHex: "#E8A0FF",
+  reader: "paper",
+  density: "comfortable",
+  notify: true,
+  notifyPreview: true,
+  closeToTray: true,
+  markReadOnOpen: true,
+};
 
 const KEY = "missiva.prefs";
 

@@ -1,16 +1,22 @@
 import { useState } from "react";
-import { api, errorText } from "../api";
+import { api, errorText, inTauri } from "../api";
 import { monoOf } from "../format";
 import { Icon, type IconName } from "../icons";
+import { notificationsAllowed, notifyTest } from "../notify";
+import { SHORTCUTS } from "../shortcuts";
 import { PRESETS, accentOf, inkFor, isHex, type Density, type Prefs, type Reader } from "../prefs";
 import type { Account, AccountPatch } from "../types";
 import { CloseButton, Modal } from "./Modal";
 
-export type Section = "accounts" | "look";
+export type Section = "accounts" | "look" | "notifications" | "tray" | "shortcuts" | "privacy";
 
 const SECTIONS: { id: Section; label: string; icon: IconName }[] = [
   { id: "accounts", label: "Account", icon: "user" },
   { id: "look", label: "Aspetto", icon: "palette" },
+  { id: "notifications", label: "Notifiche", icon: "bell" },
+  { id: "tray", label: "Area di notifica", icon: "tray" },
+  { id: "shortcuts", label: "Scorciatoie", icon: "keys" },
+  { id: "privacy", label: "Privacy e sicurezza", icon: "lock" },
 ];
 
 const ACCOUNT_COLORS = ["#F2A65A", "#7AB0FF", "#C7B5FF", "#7EE0B5", "#FF8F7A", "#8FD3FF"];
@@ -23,6 +29,8 @@ interface Props {
   onAccountChanged: (a: Account) => void;
   onAccountRemoved: (id: string) => void;
   onAddAccount: () => void;
+  trayAvailable: boolean;
+  onClearCache: () => Promise<void>;
   onClose: () => void;
 }
 
@@ -44,7 +52,12 @@ export function Settings(p: Props) {
           ))}
         </nav>
         <section className="settings-main scroll">
-          {section === "look" ? <Look prefs={p.prefs} onPrefs={p.onPrefs} /> : <Accounts {...p} />}
+          {section === "accounts" && <Accounts {...p} />}
+          {section === "look" && <Look prefs={p.prefs} onPrefs={p.onPrefs} />}
+          {section === "notifications" && <Notifications prefs={p.prefs} onPrefs={p.onPrefs} />}
+          {section === "tray" && <Tray prefs={p.prefs} onPrefs={p.onPrefs} available={p.trayAvailable} />}
+          {section === "shortcuts" && <Shortcuts />}
+          {section === "privacy" && <Privacy prefs={p.prefs} onPrefs={p.onPrefs} onClearCache={p.onClearCache} />}
         </section>
       </div>
     </Modal>
@@ -271,5 +284,161 @@ function AccountCard({ account: a, onChanged, onRemoved }: { account: Account; o
         )}
       </div>
     </div>
+  );
+}
+
+function Head({ title, text }: { title: string; text: string }) {
+  return (
+    <div className="settings-head">
+      <h1>{title}</h1>
+      <p>{text}</p>
+    </div>
+  );
+}
+
+/** Riga con titolo, descrizione e interruttore. */
+function Toggle({ title, desc, checked, disabled, onChange }: { title: string; desc?: string; checked: boolean; disabled?: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className={disabled ? "setting-row disabled" : "setting-row"}>
+      <span className="setting-text">
+        <span className="setting-title">{title}</span>
+        {desc && <span className="setting-desc">{desc}</span>}
+      </span>
+      <input type="checkbox" role="switch" className="switch" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+    </label>
+  );
+}
+
+type PrefsProps = { prefs: Prefs; onPrefs: (p: Prefs) => void };
+
+function Notifications({ prefs, onPrefs }: PrefsProps) {
+  const [status, setStatus] = useState<string | null>(null);
+  const enable = async (notify: boolean) => {
+    onPrefs({ ...prefs, notify });
+    if (notify && inTauri && !(await notificationsAllowed(true))) {
+      setStatus("Il sistema non consente le notifiche a Missiva: abilitale dalle impostazioni del desktop.");
+    }
+  };
+  const test = async () => setStatus((await notifyTest(prefs.notifyPreview)) ? "Notifica di prova inviata." : "Notifiche non disponibili: controlla le impostazioni del desktop.");
+  return (
+    <>
+      <Head title="Notifiche" text="Avvisi del desktop quando arriva posta nuova in uno qualsiasi degli account." />
+      <div className="settings-list">
+        <Toggle title="Notifiche per i nuovi messaggi" desc="Solo per i messaggi non letti arrivati in Posta in arrivo." checked={prefs.notify} onChange={enable} />
+        <Toggle
+          title="Mostra mittente e oggetto"
+          desc="Se disattivato la notifica dice solo quanti messaggi sono arrivati: utile quando condividi lo schermo."
+          checked={prefs.notifyPreview}
+          disabled={!prefs.notify}
+          onChange={(notifyPreview) => onPrefs({ ...prefs, notifyPreview })}
+        />
+      </div>
+      <div className="foot-actions">
+        <button type="button" className="btn btn-soft btn-sm" onClick={test} disabled={!prefs.notify || !inTauri}>
+          <Icon name="bell" size={14} />
+          Invia notifica di prova
+        </button>
+        {status && <span className="setting-desc" role="status">{status}</span>}
+      </div>
+    </>
+  );
+}
+
+function Tray({ prefs, onPrefs, available }: PrefsProps & { available: boolean }) {
+  return (
+    <>
+      <Head title="Area di notifica" text="L’icona di Missiva nel pannello mostra i non letti e tiene la posta sincronizzata anche a finestra chiusa." />
+      <div role="status" className={available ? "status ok" : "status info"}>
+        <Icon name={available ? "check" : "alert"} size={16} stroke={2.2} />
+        <span>
+          {available
+            ? "Icona attiva. Dal suo menu puoi riaprire la finestra, sincronizzare o uscire."
+            : "Icona non disponibile su questo desktop (serve il supporto AppIndicator, su GNOME tramite l’estensione AppIndicator)."}
+        </span>
+      </div>
+      <div className="settings-list">
+        <Toggle
+          title="Chiudendo la finestra, resta nell’area di notifica"
+          desc="Missiva continua a sincronizzare e a notificare. Per uscire usa «Esci» nel menu dell’icona."
+          checked={prefs.closeToTray && available}
+          disabled={!available}
+          onChange={(closeToTray) => onPrefs({ ...prefs, closeToTray })}
+        />
+      </div>
+    </>
+  );
+}
+
+function Shortcuts() {
+  return (
+    <>
+      <Head title="Scorciatoie" text="Le lettere singole funzionano quando non stai scrivendo in un campo di testo." />
+      {SHORTCUTS.map((g) => (
+        <div key={g.group} className="stack-10">
+          <span className="eyebrow">{g.group}</span>
+          <div className="settings-list">
+            {g.items.map((i) => (
+              <div key={i.label} className="setting-row">
+                <span className="setting-text">{i.label}</span>
+                <span className="keys">
+                  {i.keys.map((k) => (
+                    <kbd key={k}>{k}</kbd>
+                  ))}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function Privacy({ prefs, onPrefs, onClearCache }: PrefsProps & { onClearCache: () => Promise<void> }) {
+  const [clearing, setClearing] = useState<"idle" | "busy" | "done">("idle");
+  const clear = async () => {
+    setClearing("busy");
+    await onClearCache().catch(() => {});
+    setClearing("done");
+  };
+  return (
+    <>
+      <Head title="Privacy e sicurezza" text="Cosa resta sul computer e cosa viene caricato quando apri un messaggio." />
+      <div className="settings-list">
+        <Toggle
+          title="Segna come letto quando apri un messaggio"
+          desc="Se disattivato, il messaggio resta non letto finché non lo segni tu (anche sul server)."
+          checked={prefs.markReadOnOpen}
+          onChange={(markReadOnOpen) => onPrefs({ ...prefs, markReadOnOpen })}
+        />
+      </div>
+      <div className="settings-list">
+        <div className="setting-row">
+          <Icon name="shield" size={18} />
+          <span className="setting-text">
+            <span className="setting-title">Nessun contenuto remoto</span>
+            <span className="setting-desc">I messaggi si leggono come testo: immagini remote e pixel di tracciamento non vengono mai scaricati.</span>
+          </span>
+        </div>
+        <div className="setting-row">
+          <Icon name="lock" size={18} />
+          <span className="setting-text">
+            <span className="setting-title">Credenziali nel portachiavi</span>
+            <span className="setting-desc">Password e token sono nel Secret Service di sistema; le connessioni a IMAP e SMTP usano sempre TLS o STARTTLS.</span>
+          </span>
+        </div>
+      </div>
+      <div className="stack-10">
+        <span className="setting-title">Cache locale</span>
+        <span className="setting-desc">I messaggi scaricati restano in ~/.cache/missiva per aprirli subito all’avvio. Svuotarla non tocca la posta sui server.</span>
+        <div className="foot-actions">
+          <button type="button" className="btn btn-soft btn-sm" onClick={clear} disabled={clearing === "busy"}>
+            <Icon name="trash" size={14} />
+            {clearing === "busy" ? "Svuoto e risincronizzo…" : "Svuota la cache dei messaggi"}
+          </button>
+          {clearing === "done" && <span className="setting-desc" role="status">Cache svuotata.</span>}
+        </div>
+      </div>
+    </>
   );
 }

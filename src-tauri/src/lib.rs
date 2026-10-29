@@ -6,6 +6,7 @@ mod mail;
 mod oauth;
 mod secrets;
 mod smtp;
+mod tray;
 
 use serde::{Deserialize, Serialize};
 use tauri::async_runtime::spawn_blocking;
@@ -300,11 +301,38 @@ async fn open_attachment(handle: AppHandle, target: MessageRef, index: usize) ->
     Ok(path.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn clear_cache() -> Result<()> {
+    for a in accounts::load()? {
+        mail::clear_cache(&a.id);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn tray_available(handle: AppHandle) -> bool {
+    tray::available(&handle)
+}
+
+#[tauri::command]
+fn set_tray_unread(handle: AppHandle, count: usize) {
+    tray::set_unread(&handle, count);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .manage(tray::TrayState(std::sync::atomic::AtomicBool::new(false)))
+        .setup(|app| {
+            // L'app funziona anche senza area di notifica: in quel caso chiudere la finestra la chiude davvero.
+            if let Err(e) = tray::setup(app) {
+                eprintln!("Area di notifica non disponibile: {e}");
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_accounts,
             autoconfig,
@@ -318,6 +346,9 @@ pub fn run() {
             move_message,
             send_message,
             open_attachment,
+            clear_cache,
+            tray_available,
+            set_tray_unread,
         ])
         .run(tauri::generate_context!())
         .expect("errore durante l'avvio di Missiva");

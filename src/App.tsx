@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, errorText, inTauri } from "./api";
 import { AddAccount } from "./components/AddAccount";
 import { Compose } from "./components/Compose";
@@ -9,6 +11,7 @@ import { Sidebar, VIEWS, type View } from "./components/Sidebar";
 import { TitleBar } from "./components/TitleBar";
 import { longTime, plural, relativeSync } from "./format";
 import { Icon } from "./icons";
+import { notifyNewMail } from "./notify";
 import { applyPrefs, loadPrefs, savePrefs, type Prefs } from "./prefs";
 import type { Account, Draft, Folder, Message } from "./types";
 
@@ -40,7 +43,12 @@ export function App() {
   const [prefs, setPrefsState] = useState<Prefs>(loadPrefs);
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null);
   const [, setTick] = useState(0);
+  const [trayAvailable, setTrayAvailable] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
+  // Id già visti in posta in arrivo: serve a notificare solo i messaggi davvero nuovi.
+  const knownIds = useRef<Set<string> | null>(null);
 
   const accountsById = useMemo(() => Object.fromEntries(accounts.map((a) => [a.id, a])), [accounts]);
 
@@ -66,6 +74,12 @@ export function App() {
     setSyncing((n) => n + 1);
     try {
       const report = await api.syncFolder(folder);
+      if (folder === "inbox") {
+        const known = knownIds.current;
+        const fresh = known ? report.messages.filter((m) => m.unread && !known.has(m.id)) : [];
+        knownIds.current = new Set([...(known ?? []), ...report.messages.map((m) => m.id)]);
+        if (fresh.length && prefsRef.current.notify) notifyNewMail(fresh, prefsRef.current.notifyPreview);
+      }
       setByFolder((all) => ({ ...all, [folder]: report.messages.sort(byDateDesc) }));
       setErrors(Object.fromEntries(report.errors.map((e) => [e.accountId, e.message])));
       setLastSync(new Date());
@@ -78,6 +92,7 @@ export function App() {
 
   const loadFolder = useCallback(async (folder: Folder) => {
     const cached = await api.cachedMessages(folder).catch(() => []);
+    if (folder === "inbox" && cached.length && !knownIds.current) knownIds.current = new Set(cached.map((m) => m.id));
     setByFolder((all) => ({ ...all, [folder]: all[folder]?.length ? all[folder] : cached.sort(byDateDesc) }));
     await sync(folder);
   }, [sync]);
@@ -107,6 +122,26 @@ export function App() {
     };
   }, [view, accounts.length, sync]);
 
+  // Area di notifica: disponibilità, voce "Sincronizza ora" e chiusura che nasconde la finestra.
+  useEffect(() => {
+    if (!inTauri) return;
+    api.trayAvailable().then(setTrayAvailable);
+    const win = getCurrentWindow();
+    const unlisten = [
+      listen("tray-sync", () => sync(folderOf(viewRef.current))),
+      win.onCloseRequested(async (e) => {
+        if (prefsRef.current.closeToTray && (await api.trayAvailable())) {
+          e.preventDefault();
+          await win.hide();
+        }
+      }),
+    ];
+    return () => unlisten.forEach((p) => p.then((off) => off()));
+  }, [sync]);
+
+  const viewRef = useRef(view);
+  viewRef.current = view;
+
   const changeView = (v: View) => {
     setView(v);
     setSelectedId(null);
@@ -130,6 +165,11 @@ export function App() {
 
   const unreadByAccount = Object.fromEntries(accounts.map((a) => [a.id, inbox.filter((m) => m.unread && m.accountId === a.id).length]));
   const inFilter = (m: Message) => accountFilter === "all" || m.accountId === accountFilter;
+  const totalUnread = inbox.filter((m) => m.unread && accountsById[m.accountId]).length;
+  useEffect(() => {
+    api.setTrayUnread(totalUnread).catch(() => {});
+  }, [totalUnread]);
+
   const counts = {
     inbox: inbox.filter((m) => m.unread && inFilter(m)).length,
     flagged: inbox.filter((m) => m.flagged && inFilter(m)).length,
@@ -140,7 +180,7 @@ export function App() {
 
   const select = (m: Message) => {
     setSelectedId(m.id);
-    if (m.unread) {
+    if (m.unread && prefs.markReadOnOpen) {
       patchMessage(m.id, { unread: false });
       api.setFlags(m, { seen: true }).catch((e) => {
         patchMessage(m.id, { unread: true });
@@ -243,9 +283,33 @@ export function App() {
       } else if (e.key === "F5") {
         e.preventDefault();
         sync(folderOf(view));
-      } else if (!typing && !e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "c") {
-        e.preventDefault();
-        compose();
+      } else if (!typing && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        const step = (d: number) => {
+          const i = visible.findIndex((m) => m.id === selected?.id);
+          const next = visible[Math.min(Math.max(i + d, 0), visible.length - 1)];
+          if (next) select(next);
+        };
+        const actions: Record<string, () => void> = {
+          c: () => compose(),
+          j: () => step(1),
+          k: () => step(-1),
+        };
+        if (selected) {
+          Object.assign(actions, {
+            r: () => reply(selected, false),
+            a: () => reply(selected, true),
+            f: () => forward(selected),
+            e: () => selected.folder !== "archive" && move(selected, "archive"),
+            delete: () => selected.folder !== "trash" && move(selected, "trash"),
+            s: () => toggleStar(selected),
+            u: () => !selected.unread && markUnread(selected),
+          });
+        }
+        const run = actions[e.key.toLowerCase()];
+        if (run) {
+          e.preventDefault();
+          run();
+        }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -350,6 +414,13 @@ export function App() {
           onAccountChanged={accountChanged}
           onAccountRemoved={accountRemoved}
           onAddAccount={() => setModal({ kind: "account" })}
+          trayAvailable={trayAvailable}
+          onClearCache={async () => {
+            await api.clearCache();
+            setByFolder({});
+            knownIds.current = null;
+            await loadFolder(folderOf(view));
+          }}
           onClose={() => setModal(null)}
         />
       )}
