@@ -282,40 +282,73 @@ async fn sync_mailbox(account: String, mailbox: String) -> Result<SyncReport> {
     })
 }
 
+/// Messaggi raggruppati per account e casella: ogni gruppo usa una sola sessione IMAP.
+fn by_mailbox(targets: Vec<MessageRef>) -> Vec<(MessageRef, Vec<u32>)> {
+    let mut groups: Vec<(MessageRef, Vec<u32>)> = Vec::new();
+    for t in targets {
+        match groups.iter_mut().find(|(g, _)| g.account_id == t.account_id && g.mailbox == t.mailbox && g.folder == t.folder) {
+            Some((_, uids)) => uids.push(t.uid),
+            None => {
+                let uid = t.uid;
+                groups.push((t, vec![uid]));
+            }
+        }
+    }
+    groups
+}
+
 #[tauri::command]
 async fn set_flags(target: MessageRef, seen: Option<bool>, flagged: Option<bool>) -> Result<()> {
-    let acc = accounts::get(&target.account_id)?;
-    let auth = auth_for(&acc).await?;
-    blocking(move || {
-        if let Some(on) = seen {
-            imap_client::set_flag(&acc, &auth, &target.mailbox, target.uid, "\\Seen", on)?;
-        }
-        if let Some(on) = flagged {
-            imap_client::set_flag(&acc, &auth, &target.mailbox, target.uid, "\\Flagged", on)?;
-        }
-        mail::update_cache(&acc.id, &target.bucket(), |msgs| {
-            if let Some(m) = msgs.iter_mut().find(|m| m.uid == target.uid) {
-                if let Some(on) = seen {
-                    m.unread = !on;
-                }
-                if let Some(on) = flagged {
-                    m.flagged = on;
-                }
+    set_flags_many(vec![target], seen, flagged).await
+}
+
+/// Segna come letti/non letti o contrassegna più messaggi, anche di account diversi.
+#[tauri::command]
+async fn set_flags_many(targets: Vec<MessageRef>, seen: Option<bool>, flagged: Option<bool>) -> Result<()> {
+    for (target, uids) in by_mailbox(targets) {
+        let acc = accounts::get(&target.account_id)?;
+        let auth = auth_for(&acc).await?;
+        blocking(move || {
+            if let Some(on) = seen {
+                imap_client::set_flag(&acc, &auth, &target.mailbox, &uids, "\\Seen", on)?;
             }
+            if let Some(on) = flagged {
+                imap_client::set_flag(&acc, &auth, &target.mailbox, &uids, "\\Flagged", on)?;
+            }
+            mail::update_cache(&acc.id, &target.bucket(), |msgs| {
+                for m in msgs.iter_mut().filter(|m| uids.contains(&m.uid)) {
+                    if let Some(on) = seen {
+                        m.unread = !on;
+                    }
+                    if let Some(on) = flagged {
+                        m.flagged = on;
+                    }
+                }
+            })
         })
-    })
-    .await
+        .await?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 async fn move_message(target: MessageRef, to: Folder) -> Result<()> {
-    let acc = accounts::get(&target.account_id)?;
-    let auth = auth_for(&acc).await?;
-    blocking(move || {
-        imap_client::move_to(&acc, &auth, &target.mailbox, target.uid, to)?;
-        mail::update_cache(&acc.id, &target.bucket(), |msgs| msgs.retain(|m| m.uid != target.uid))
-    })
-    .await
+    move_messages(vec![target], to).await
+}
+
+/// Sposta più messaggi in Archivio o Cestino: una sessione per casella.
+#[tauri::command]
+async fn move_messages(targets: Vec<MessageRef>, to: Folder) -> Result<()> {
+    for (target, uids) in by_mailbox(targets) {
+        let acc = accounts::get(&target.account_id)?;
+        let auth = auth_for(&acc).await?;
+        blocking(move || {
+            imap_client::move_to(&acc, &auth, &target.mailbox, &uids, to)?;
+            mail::update_cache(&acc.id, &target.bucket(), |msgs| msgs.retain(|m| !uids.contains(&m.uid)))
+        })
+        .await?;
+    }
+    Ok(())
 }
 
 async fn deliver(outgoing: smtp::Outgoing) -> Result<()> {
@@ -572,6 +605,8 @@ pub fn run() {
             sync_folder,
             set_flags,
             move_message,
+            move_messages,
+            set_flags_many,
             send_message,
             schedule_message,
             list_scheduled,

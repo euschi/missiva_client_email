@@ -13,8 +13,13 @@ export const SHORTCUTS: { group: string; items: { keys: string[]; label: string 
   {
     group: "Elenco",
     items: [
-      { keys: ["J"], label: "Messaggio successivo" },
-      { keys: ["K"], label: "Messaggio precedente" },
+      { keys: ["J"], label: "Messaggio successivo (anche ↓)" },
+      { keys: ["K"], label: "Messaggio precedente (anche ↑)" },
+      { keys: ["Ctrl", "clic"], label: "Aggiungi o togli dalla selezione" },
+      { keys: ["Maiusc", "clic"], label: "Seleziona un intervallo" },
+      { keys: ["Maiusc", "↓"], label: "Allarga la selezione (anche Maiusc ↑)" },
+      { keys: ["Ctrl", "A"], label: "Seleziona tutti i messaggi dell'elenco" },
+      { keys: ["Esc"], label: "Annulla la selezione" },
     ],
   },
   {
