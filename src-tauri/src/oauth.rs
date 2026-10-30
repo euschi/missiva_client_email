@@ -1,8 +1,9 @@
 //! Accesso OAuth 2.0 (PKCE + redirect su loopback) per Google e Microsoft.
 //!
-//! I client ID vanno registrati dall'utente e letti da variabili d'ambiente
-//! (`MISSIVA_GOOGLE_CLIENT_ID`, `MISSIVA_GOOGLE_CLIENT_SECRET`, `MISSIVA_MICROSOFT_CLIENT_ID`)
-//! oppure da ~/.config/missiva/oauth.json.
+//! I client ID identificano l'app, non l'utente: chiunque accede con il proprio account.
+//! Si leggono, in ordine, da variabili d'ambiente (`MISSIVA_GOOGLE_CLIENT_ID`,
+//! `MISSIVA_GOOGLE_CLIENT_SECRET`, `MISSIVA_MICROSOFT_CLIENT_ID`), da ~/.config/missiva/oauth.json
+//! e infine dai valori delle stesse variabili presenti al momento della compilazione.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -36,10 +37,13 @@ struct ClientIds {
     microsoft: Option<ClientId>,
 }
 
+/// Accetta anche i nomi del JSON scaricato dalla Google Cloud Console (`client_id`, `client_secret`).
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClientId {
+    #[serde(alias = "client_id")]
     client_id: String,
+    #[serde(alias = "client_secret")]
     client_secret: Option<String>,
 }
 
@@ -58,11 +62,23 @@ fn client_id(provider: Provider) -> Result<ClientId> {
     } else {
         ClientIds::default()
     };
-    let found = match provider {
-        Provider::Google => ids.google,
-        _ => ids.microsoft,
+    let (found, built_in) = match provider {
+        Provider::Google => (
+            ids.google,
+            option_env!("MISSIVA_GOOGLE_CLIENT_ID").map(|id| (id, option_env!("MISSIVA_GOOGLE_CLIENT_SECRET"))),
+        ),
+        _ => (
+            ids.microsoft,
+            option_env!("MISSIVA_MICROSOFT_CLIENT_ID").map(|id| (id, option_env!("MISSIVA_MICROSOFT_CLIENT_SECRET"))),
+        ),
     };
-    found.ok_or_else(|| {
+    let built_in = built_in
+        .filter(|(id, _)| !id.is_empty())
+        .map(|(id, secret)| ClientId {
+            client_id: id.to_string(),
+            client_secret: secret.filter(|s| !s.is_empty()).map(str::to_string),
+        });
+    found.or(built_in).ok_or_else(|| {
         msg(format!(
             "Manca il client ID OAuth: imposta {id_var} oppure compila {}",
             path.display()

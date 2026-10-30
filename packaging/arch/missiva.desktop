@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Missiva
+GenericName=Client email
+Comment=Posta in arrivo unificata per Google, Microsoft e IMAP
+Exec=missiva
+Icon=missiva
+Terminal=false
+Categories=Network;Email;
+Keywords=email;posta;mail;imap;
+StartupWMClass=missiva
