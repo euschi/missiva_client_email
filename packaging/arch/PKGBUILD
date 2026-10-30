@@ -1,0 +1,38 @@
+# Pacchetto Arch compilato dal repository locale: usare scripts/build-arch.sh.
+pkgname=missiva
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Client email per Linux con posta in arrivo unificata"
+arch=('x86_64' 'aarch64')
+license=('LicenseRef-Missiva')
+depends=('webkit2gtk-4.1' 'gtk3' 'dbus' 'libsoup3' 'openssl' 'hicolor-icon-theme')
+makedepends=('cargo' 'nodejs' 'npm')
+optdepends=(
+  'libayatana-appindicator: icona nell area di notifica'
+  'gnome-keyring: portachiavi per password e token (oppure kwallet)'
+)
+# LTO di makepkg e pacchetti di debug non vanno d'accordo con la build di Rust.
+options=('!lto' '!debug')
+
+_root="$(realpath "$startdir/../..")"
+
+pkgver() {
+  sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' "$_root/src-tauri/tauri.conf.json" | head -n1
+}
+
+build() {
+  cd "$_root"
+  npm ci
+  npx tauri build --no-bundle
+}
+
+package() {
+  cd "$_root"
+  install -Dm755 src-tauri/target/release/missiva "$pkgdir/usr/bin/missiva"
+  install -Dm644 packaging/arch/missiva.desktop "$pkgdir/usr/share/applications/missiva.desktop"
+  install -Dm644 src-tauri/icons/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/missiva.png"
+  install -Dm644 src-tauri/icons/64x64.png "$pkgdir/usr/share/icons/hicolor/64x64/apps/missiva.png"
+  install -Dm644 src-tauri/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/missiva.png"
+  install -Dm644 src-tauri/icons/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/missiva.png"
+  install -Dm644 src-tauri/icons/icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/missiva.svg"
+}

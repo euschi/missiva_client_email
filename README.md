@@ -15,10 +15,22 @@ npm run tauri build    # pacchetti .deb, .rpm e AppImage
 
 Dipendenze di sistema (Arch): `webkit2gtk-4.1`, `libsoup3`, `openssl` e un servizio Secret Service attivo (GNOME Keyring o KWallet).
 
+## Build per Arch Linux
+
+```sh
+cp .env.example .env          # una volta: inserisci i client ID OAuth dell'app
+scripts/build-arch.sh         # crea dist-arch/missiva-<versione>-1-x86_64.pkg.tar.zst
+scripts/build-arch.sh --install   # come sopra, poi lo installa con pacman
+```
+
+Lo script usa `makepkg` con `packaging/arch/PKGBUILD`: installa le dipendenze mancanti, compila in release e crea un pacchetto con binario `/usr/bin/missiva`, voce nel menu applicazioni e icone. Si disinstalla con `sudo pacman -R missiva`.
+
+I client ID presenti in `.env` al momento della build finiscono nel binario: chi installa il pacchetto accede con il proprio account Google o Microsoft senza configurare nulla. Variabili d'ambiente e `~/.config/missiva/oauth.json` restano un override a runtime.
+
 ## Account
 
 - **IMAP / SMTP**: email e password (o password per app). I server vengono cercati in automatico nel database ISPDB di Thunderbird e restano modificabili.
-- **Google e Microsoft**: accesso OAuth 2.0 nel browser (PKCE, redirect su porta locale). Servono client ID registrati da te:
+- **Google e Microsoft**: accesso OAuth 2.0 nel browser (PKCE, redirect su porta locale). Servono client ID dell'app, registrati una volta sola da chi la distribuisce e validi per qualsiasi utente:
   - Google Cloud Console → credenziali OAuth di tipo *App desktop*, con l'API Gmail abilitata (scope `https://mail.google.com/`).
   - Microsoft Entra → registrazione app *client pubblico*, redirect `http://localhost`, permessi delegati `IMAP.AccessAsUser.All` e `SMTP.Send`.
 
