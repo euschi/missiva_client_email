@@ -20,7 +20,10 @@ interface Props {
   messages: Message[];
   accounts: Record<string, Account>;
   selectedId: string | null;
-  onSelect: (m: Message) => void;
+  /** Clic su una riga, con Ctrl (aggiungi/togli) o Maiusc (intervallo). */
+  onSelect: (m: Message, mods: { ctrl: boolean; shift: boolean }) => void;
+  /** Messaggi della selezione multipla (vuoto se ce n'è uno solo). */
+  checkedIds: string[];
   labelsOf: (m: Message) => Label[];
   /** Ora di riapparizione (posticipati) o di invio (programmati). */
   wakeOf: (m: Message) => number | undefined;
@@ -29,7 +32,7 @@ interface Props {
   empty: { title: string; text: string; action?: { label: string; run: () => void } };
 }
 
-export function MessageList({ title, subtitle, chip, onChip, messages, accounts, selectedId, onSelect, labelsOf, wakeOf, threadSize, empty }: Props) {
+export function MessageList({ title, subtitle, chip, onChip, messages, accounts, selectedId, onSelect, checkedIds, labelsOf, wakeOf, threadSize, empty }: Props) {
   const groups: { label: string; items: Message[] }[] = [];
   for (const m of messages) {
     const label = groupLabel(m.date);
@@ -78,9 +81,11 @@ export function MessageList({ title, subtitle, chip, onChip, messages, accounts,
                 <button
                   key={m.id}
                   type="button"
-                  className={m.unread ? "row unread" : "row"}
+                  className={["row", m.unread && "unread", checkedIds.includes(m.id) && "checked"].filter(Boolean).join(" ")}
                   aria-current={m.id === selectedId}
-                  onClick={() => onSelect(m)}
+                  // Maiusc + clic non deve selezionare il testo delle righe.
+                  onMouseDown={(e) => e.shiftKey && e.preventDefault()}
+                  onClick={(e) => onSelect(m, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
                 >
                   <span className="avatar-wrap">
                     <span className="avatar">{initials(m.fromName)}</span>

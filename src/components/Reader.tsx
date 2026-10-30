@@ -30,6 +30,11 @@ interface Props {
   /** Mittenti di cui mostrare sempre le immagini remote. */
   trustedSenders: string[];
   onTrustSender: (email: string) => void;
+  /** Selezione multipla: con almeno due messaggi il lettore mostra il riepilogo e le azioni di gruppo. */
+  bulk: Message[] | null;
+  onBulkMove: (to: "archive" | "trash") => void;
+  onBulkFlags: (flags: { seen?: boolean; flagged?: boolean }) => void;
+  onBulkClear: () => void;
   menu: ReaderMenu;
   onMenu: (menu: ReaderMenu) => void;
   labels: Label[];
@@ -49,6 +54,7 @@ export function Reader(p: Props) {
   const canMove = m && m.folder !== "trash";
   const toggle = (menu: ReaderMenu) => p.onMenu(p.menu === menu ? null : menu);
   const close = () => p.onMenu(null);
+  if (p.bulk) return <BulkPanel {...p} bulk={p.bulk} />;
   return (
     <main className="reader">
       {m?.scheduled ? (
@@ -397,5 +403,69 @@ function ThreadMessage({ message: m, account: a, mine, open, collapsible, onTogg
         </div>
       )}
     </section>
+  );
+}
+
+/** Più messaggi selezionati: azioni di gruppo e riepilogo al posto del lettore. */
+function BulkPanel({ bulk, onBulkMove, onBulkFlags, onBulkClear }: Props & { bulk: Message[] }) {
+  const allFlagged = bulk.every((m) => m.flagged);
+  const anyUnread = bulk.some((m) => m.unread);
+  const shown = bulk.slice(0, 8);
+  return (
+    <main className="reader">
+      <div className="reader-bar">
+        <div className="toolbar-group">
+          <button type="button" className="icon-btn lg" aria-label="Archivia i selezionati" title="Archivia (E)" onClick={() => onBulkMove("archive")}>
+            <Icon name="archive" size={17} stroke={1.7} />
+          </button>
+          <button type="button" className="icon-btn lg" aria-label="Sposta i selezionati nel cestino" title="Sposta nel cestino (Canc)" onClick={() => onBulkMove("trash")}>
+            <Icon name="trash" size={17} stroke={1.7} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn lg"
+            aria-label={anyUnread ? "Segna come letti" : "Segna come non letti"}
+            title={anyUnread ? "Segna come letti" : "Segna come non letti (U)"}
+            onClick={() => onBulkFlags({ seen: anyUnread })}
+          >
+            <Icon name={anyUnread ? "mail" : "markUnread"} size={17} stroke={1.7} />
+          </button>
+          <span className="divider" />
+          <button
+            type="button"
+            className={allFlagged ? "icon-btn lg starred" : "icon-btn lg"}
+            aria-label={allFlagged ? "Togli contrassegno" : "Contrassegna"}
+            aria-pressed={allFlagged}
+            title="Contrassegna (S)"
+            onClick={() => onBulkFlags({ flagged: !allFlagged })}
+          >
+            <Icon name="star" size={17} stroke={1.7} fill={allFlagged ? "currentColor" : "none"} />
+          </button>
+        </div>
+        <div className="toolbar-group end">
+          <button type="button" className="btn btn-soft btn-sm" onClick={onBulkClear}>
+            Deseleziona
+          </button>
+        </div>
+      </div>
+      <article className="paper scroll">
+        <div className="paper-inner bulk">
+          <div className="bulk-count">{bulk.length}</div>
+          <h2 className="reader-subject">messaggi selezionati</h2>
+          <ul className="bulk-list">
+            {shown.map((m) => (
+              <li key={m.id}>
+                <span className="bulk-from">{m.fromName}</span>
+                <span className="bulk-subject">{m.subject}</span>
+              </li>
+            ))}
+            {bulk.length > shown.length && <li className="paper-muted">e altri {bulk.length - shown.length}</li>}
+          </ul>
+          <p className="paper-muted bulk-hint">
+            <kbd>Canc</kbd> cestino · <kbd>E</kbd> archivia · <kbd>S</kbd> contrassegna · <kbd>U</kbd> non letti · <kbd>Esc</kbd> deseleziona
+          </p>
+        </div>
+      </article>
+    </main>
   );
 }

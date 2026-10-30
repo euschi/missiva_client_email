@@ -71,4 +71,4 @@ Account nella barra laterale: con il pulsante ⋯ o il tasto destro si rinomina 
 
 ## Scorciatoie
 
-`C` scrivi · `Ctrl K` cerca · `F5` sincronizza · `J`/`K` messaggio successivo/precedente · `R`/`A`/`F` rispondi, a tutti, inoltra · `E` archivia · `B` posticipa · `L` etichetta · `F2` rinomina l'account · `Alt ↑`/`Alt ↓` sposta l'account · `Ctrl ↵` invia · `Esc` chiude le finestre (elenco completo in Impostazioni → Scorciatoie)
+`C` scrivi · `Ctrl K` cerca · `F5` sincronizza · `J`/`K` o `↓`/`↑` messaggio successivo/precedente · `Ctrl`+clic, `Maiusc`+clic, `Maiusc ↓/↑` e `Ctrl A` selezione multipla (poi `Canc`, `E`, `S`, `U` valgono per tutti) · `R`/`A`/`F` rispondi, a tutti, inoltra · `E` archivia · `B` posticipa · `L` etichetta · `F2` rinomina l'account · `Alt ↑`/`Alt ↓` sposta l'account · `Ctrl ↵` invia · `Esc` chiude le finestre (elenco completo in Impostazioni → Scorciatoie)

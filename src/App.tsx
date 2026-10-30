@@ -85,6 +85,9 @@ export function App() {
   const [chip, setChip] = useState<Chip>("all");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Selezione multipla (Ctrl/Maiusc + clic, Maiusc + frecce): conta solo con almeno due messaggi.
+  const [checked, setChecked] = useState<string[]>([]);
+  const anchor = useRef<string | null>(null);
   const [syncing, setSyncing] = useState(0);
   const [lastSync, setLastSync] = useState<Date | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -267,6 +270,7 @@ export function App() {
   const openBox = async (b: OpenBox) => {
     setBox(b);
     setSelectedId(null);
+    setChecked([]);
     setMenu(null);
     if (!byFolder[boxKey(b)]) {
       const cached = await api.cachedMailbox(b.accountId, b.mailbox.path).catch(() => []);
@@ -281,6 +285,7 @@ export function App() {
     setBox(null);
     setView(v);
     setSelectedId(null);
+    setChecked([]);
     setMenu(null);
     if (v === "scheduled") loadScheduled();
     const folder = folderOf(v);
@@ -315,6 +320,8 @@ export function App() {
       (!q || [m.fromName, m.fromEmail, m.subject, m.body].some((s) => s.toLowerCase().includes(q))),
   );
   const selected = visible.find((m) => m.id === selectedId) ?? visible[0] ?? null;
+  const chosen = checked.length > 1 ? visible.filter((m) => checked.includes(m.id)) : [];
+  const bulk = chosen.length > 1 ? chosen : null;
   // Conversazioni su tutte le cartelle caricate (Inviati compresa).
   const threads = useMemo(() => buildThreads(Object.values(byFolder).flatMap((list) => list ?? [])), [byFolder]);
 
@@ -362,6 +369,77 @@ export function App() {
     }
   };
 
+  /** Messaggi tra due id dell'elenco visibile, estremi compresi. */
+  const between = (fromId: string, toId: string) => {
+    const a = visible.findIndex((x) => x.id === fromId);
+    const b = visible.findIndex((x) => x.id === toId);
+    if (a < 0 || b < 0) return [toId];
+    return visible.slice(Math.min(a, b), Math.max(a, b) + 1).map((x) => x.id);
+  };
+
+  /** Clic su una riga: semplice apre, Ctrl aggiunge o toglie, Maiusc seleziona l'intervallo. */
+  const pick = (m: Message, mods: { ctrl: boolean; shift: boolean }) => {
+    if (mods.shift) {
+      setChecked(between(anchor.current ?? selected?.id ?? m.id, m.id));
+      setSelectedId(m.id);
+    } else if (mods.ctrl) {
+      const base = checked.length ? checked : selected ? [selected.id] : [];
+      const next = base.includes(m.id) ? base.filter((id) => id !== m.id) : [...base, m.id];
+      setChecked(next);
+      anchor.current = m.id;
+      if (next.length === 1) setSelectedId(next[0]);
+    } else {
+      setChecked([]);
+      anchor.current = m.id;
+      select(m);
+    }
+  };
+
+  /** Maiusc + ↓/↑: allarga la selezione dall'àncora alla riga successiva o precedente. */
+  const extend = (d: number) => {
+    const i = visible.findIndex((x) => x.id === selected?.id);
+    const next = visible[Math.min(Math.max(i + d, 0), visible.length - 1)];
+    if (!next || !selected) return;
+    anchor.current ??= selected.id;
+    setChecked(between(anchor.current, next.id));
+    setSelectedId(next.id);
+  };
+
+  /** Dopo un errore riallinea la cartella del messaggio con il server. */
+  const refresh = (m: Message) => (m.folder === "other" ? box && syncBox(box) : sync(m.folder));
+
+  const moveMany = (ms: Message[], to: Folder) => {
+    if (to === "trash") ms.filter((m) => m.scheduled).forEach((m) => cancelScheduled(m.scheduled!));
+    const movable = ms.filter((m) => !m.scheduled && m.folder !== to);
+    const ids = new Set(ms.map((m) => m.id));
+    const last = Math.max(...ms.map((m) => visible.indexOf(m)));
+    const next = visible.slice(last + 1).find((m) => !ids.has(m.id)) ?? [...visible].reverse().find((m) => !ids.has(m.id));
+    setChecked([]);
+    setSelectedId(next?.id ?? null);
+    if (!movable.length) return;
+    movable.forEach((m) => dropMessage(m.id));
+    const n = movable.length;
+    api
+      .moveMessages(movable, to)
+      .then(() => notify(to === "archive" ? `${plural(n, "messaggio archiviato", "messaggi archiviati")}` : `${plural(n, "messaggio spostato", "messaggi spostati")} nel cestino`))
+      .catch((e) => {
+        notify(errorText(e), true);
+        movable.forEach(refresh);
+      });
+  };
+
+  const flagMany = (ms: Message[], flags: { seen?: boolean; flagged?: boolean }) => {
+    const real = ms.filter((m) => !m.scheduled);
+    const patch: Partial<Message> = {};
+    if (flags.seen !== undefined) patch.unread = !flags.seen;
+    if (flags.flagged !== undefined) patch.flagged = flags.flagged;
+    real.forEach((m) => patchMessage(m.id, patch));
+    api.setFlagsMany(real, flags).catch((e) => {
+      real.forEach((m) => patchMessage(m.id, { unread: m.unread, flagged: m.flagged }));
+      notify(errorText(e), true);
+    });
+  };
+
   const toggleStar = (m: Message) => {
     patchMessage(m.id, { flagged: !m.flagged });
     api.setFlags(m, { flagged: !m.flagged }).catch((e) => {
@@ -384,7 +462,7 @@ export function App() {
       .then(() => notify(to === "archive" ? "Messaggio archiviato" : "Messaggio spostato nel cestino"))
       .catch((e) => {
         notify(errorText(e), true);
-        sync(m.folder);
+        refresh(m);
       });
   };
 
@@ -604,21 +682,39 @@ export function App() {
       if (e.ctrlKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
         searchRef.current?.focus();
+      } else if (e.ctrlKey && !typing && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        setChecked(visible.map((m) => m.id));
       } else if (e.key === "F5") {
         e.preventDefault();
         syncCurrent();
       } else if (!typing && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        const key = e.key.toLowerCase();
+        if (e.shiftKey && ["arrowdown", "arrowup", "j", "k"].includes(key)) {
+          e.preventDefault();
+          return extend(key === "arrowdown" || key === "j" ? 1 : -1);
+        }
         const step = (d: number) => {
           const i = visible.findIndex((m) => m.id === selected?.id);
           const next = visible[Math.min(Math.max(i + d, 0), visible.length - 1)];
-          if (next) select(next);
+          if (next) pick(next, { ctrl: false, shift: false });
         };
         const actions: Record<string, () => void> = {
           c: () => compose(),
           j: () => step(1),
           k: () => step(-1),
+          arrowdown: () => step(1),
+          arrowup: () => step(-1),
         };
-        if (selected?.scheduled) {
+        if (bulk) {
+          Object.assign(actions, {
+            escape: () => setChecked([]),
+            e: () => moveMany(bulk, "archive"),
+            delete: () => moveMany(bulk, "trash"),
+            s: () => flagMany(bulk, { flagged: !bulk.every((m) => m.flagged) }),
+            u: () => flagMany(bulk, { seen: false }),
+          });
+        } else if (selected?.scheduled) {
           const sc = selected.scheduled;
           Object.assign(actions, { delete: () => cancelScheduled(sc) });
         } else if (selected) {
@@ -634,7 +730,7 @@ export function App() {
             u: () => !selected.unread && markUnread(selected),
           });
         }
-        const run = actions[e.key.toLowerCase()];
+        const run = actions[key];
         if (run) {
           e.preventDefault();
           run();
@@ -739,7 +835,8 @@ export function App() {
           messages={visible}
           accounts={accountsById}
           selectedId={selected?.id ?? null}
-          onSelect={select}
+          onSelect={pick}
+          checkedIds={bulk ? bulk.map((m) => m.id) : []}
           labelsOf={labelsOf}
           wakeOf={(m) => m.scheduled?.at ?? snoozeOf(m)}
           threadSize={(m) => (m.scheduled ? 1 : threads.size(m))}
@@ -755,6 +852,10 @@ export function App() {
           onReply={reply}
           onForward={forward}
           onQuickReply={quickReply}
+          bulk={bulk}
+          onBulkMove={(to) => bulk && moveMany(bulk, to)}
+          onBulkFlags={(flags) => bulk && flagMany(bulk, flags)}
+          onBulkClear={() => setChecked([])}
           thread={selected ? threads.of(selected) : []}
           trustedSenders={trusted}
           onTrustSender={(email) => setTrusted([...new Set([...trusted, email.toLowerCase()])])}
