@@ -1,6 +1,6 @@
 // Dati di esempio del design, usati solo quando l'interfaccia gira nel browser senza Tauri.
 
-import type { Account, AccountPatch, Contact, Folder, Guess, Message, Outgoing, Provider, Server, SyncReport } from "./types";
+import type { Account, AccountPatch, Contact, Folder, Guess, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
 
 const tls = (host: string, port: number): Server => ({ host, port, security: "tls" });
 
@@ -54,6 +54,8 @@ let inbox: Message[] = [
     ["Questa settimana: le novità dello scheduler, lo stato di Wayland sulle schede grafiche ibride e un confronto pratico tra file system.", "Buona lettura."]),
 ];
 
+let scheduled: Scheduled[] = [];
+
 const wait = <T,>(v: T, ms = 300) => new Promise<T>((r) => setTimeout(() => r(v), ms));
 
 export const demo = {
@@ -89,4 +91,29 @@ export const demo = {
     return wait(undefined, 200);
   },
   send: (o: Outgoing) => (o.to.length ? wait(undefined, 800) : Promise.reject("Aggiungi almeno un destinatario")),
+  schedule: (outgoing: Outgoing, at: number) => {
+    const s: Scheduled = { id: crypto.randomUUID(), at, outgoing, attempts: 0, error: null };
+    scheduled = [...scheduled, s];
+    return wait(s, 200);
+  },
+  listScheduled: () => wait(scheduled, 0),
+  cancelScheduled: (id: string) => {
+    scheduled = scheduled.filter((s) => s.id !== id);
+    return wait(undefined, 200);
+  },
+  readStore: (name: string) => {
+    try {
+      return wait(JSON.parse(localStorage.getItem(`missiva.demo.${name}`) ?? "null"), 0);
+    } catch {
+      return wait(null, 0);
+    }
+  },
+  writeStore: (name: string, value: unknown) => {
+    try {
+      localStorage.setItem(`missiva.demo.${name}`, JSON.stringify(value));
+    } catch {
+      // Anteprima senza storage: i dati restano solo in memoria.
+    }
+    return wait(undefined, 0);
+  },
 };

@@ -1,12 +1,15 @@
 import { monoOf, providerLabel } from "../format";
 import { Icon, type IconName } from "../icons";
+import type { Label } from "../store";
 import type { Account } from "../types";
 
-export type View = "inbox" | "flagged" | "drafts" | "sent" | "archive" | "trash";
+export type View = "inbox" | "flagged" | "snoozed" | "scheduled" | "drafts" | "sent" | "archive" | "trash";
 
 export const VIEWS: { id: View; label: string; icon: IconName }[] = [
   { id: "inbox", label: "Posta in arrivo", icon: "inbox" },
   { id: "flagged", label: "Contrassegnati", icon: "star" },
+  { id: "snoozed", label: "Posticipati", icon: "clock" },
+  { id: "scheduled", label: "Programmati", icon: "calendar" },
   { id: "drafts", label: "Bozze", icon: "draft" },
   { id: "sent", label: "Inviati", icon: "send" },
   { id: "archive", label: "Archivio", icon: "archive" },
@@ -22,6 +25,10 @@ interface Props {
   counts: Partial<Record<View, number>>;
   unreadByAccount: Record<string, number>;
   errors: Record<string, string>;
+  labels: Label[];
+  labelCounts: Record<string, number>;
+  labelFilter: string | null;
+  onLabelFilter: (id: string | null) => void;
   onCompose: () => void;
   onAddAccount: () => void;
   onSettings: () => void;
@@ -56,6 +63,28 @@ export function Sidebar(p: Props) {
           </button>
         ))}
       </div>
+
+      {p.labels.length > 0 && (
+        <div className="accounts">
+          <div className="section-head">
+            <span className="eyebrow">Etichette</span>
+          </div>
+          {p.labels.map((l) => (
+            <button
+              key={l.id}
+              type="button"
+              className="nav-item"
+              aria-pressed={p.labelFilter === l.id}
+              aria-current={p.labelFilter === l.id}
+              onClick={() => p.onLabelFilter(p.labelFilter === l.id ? null : l.id)}
+            >
+              <i className="label-dot lg" style={{ background: l.color }} />
+              <span className="label">{l.name}</span>
+              <span className="count">{show(p.labelCounts[l.id])}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="accounts">
         <div className="section-head">

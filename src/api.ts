@@ -3,7 +3,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { demo } from "./demo";
-import type { Account, AccountPatch, Folder, Guess, Message, Outgoing, Provider, Server, SyncReport } from "./types";
+import type { Account, AccountPatch, Folder, Guess, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
 
 export const inTauri = isTauri();
 
@@ -35,6 +35,19 @@ export const api = {
   moveMessage: (m: Message, to: Folder): Promise<void> => (inTauri ? invoke("move_message", { target: ref(m), to }) : demo.move(m, to)),
 
   sendMessage: (outgoing: Outgoing): Promise<void> => (inTauri ? invoke("send_message", { outgoing }) : demo.send(outgoing)),
+
+  scheduleMessage: (outgoing: Outgoing, at: number): Promise<Scheduled> =>
+    inTauri ? invoke("schedule_message", { outgoing, at }) : demo.schedule(outgoing, at),
+
+  listScheduled: (): Promise<Scheduled[]> => (inTauri ? invoke("list_scheduled") : demo.listScheduled()),
+
+  cancelScheduled: (id: string): Promise<void> => (inTauri ? invoke("cancel_scheduled", { id }) : demo.cancelScheduled(id)),
+
+  sendScheduledNow: (id: string): Promise<void> => (inTauri ? invoke("send_scheduled_now", { id }) : demo.cancelScheduled(id)),
+
+  readStore: (name: string): Promise<unknown> => (inTauri ? invoke("read_store", { name }) : demo.readStore(name)),
+
+  writeStore: (name: string, value: unknown): Promise<void> => (inTauri ? invoke("write_store", { name, value }) : demo.writeStore(name, value)),
 
   openAttachment: (m: Message, index: number): Promise<string> =>
     inTauri ? invoke("open_attachment", { target: ref(m), index }) : Promise.resolve(m.attachments[index]?.name ?? ""),

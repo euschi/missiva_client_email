@@ -26,11 +26,17 @@ export const SHORTCUTS: { group: string; items: { keys: string[]; label: string 
       { keys: ["E"], label: "Archivia" },
       { keys: ["Canc"], label: "Sposta nel cestino" },
       { keys: ["S"], label: "Contrassegna" },
+      { keys: ["B"], label: "Posticipa" },
+      { keys: ["L"], label: "Etichetta" },
       { keys: ["U"], label: "Segna come non letto" },
     ],
   },
   {
     group: "Scrivi",
-    items: [{ keys: ["Ctrl", "↵"], label: "Invia" }],
+    items: [
+      { keys: ["Ctrl", "↵"], label: "Invia" },
+      { keys: ["Ctrl", "B"], label: "Grassetto" },
+      { keys: ["Ctrl", "I"], label: "Corsivo" },
+    ],
   },
 ];

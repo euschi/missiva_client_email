@@ -55,6 +55,8 @@ export interface Message {
   unread: boolean;
   flagged: boolean;
   attachments: Attachment[];
+  /** Solo lato interfaccia: il messaggio è in coda di invio. */
+  scheduled?: Scheduled;
 }
 
 export interface SyncReport {
@@ -75,8 +77,20 @@ export interface Outgoing {
   bcc: string[];
   subject: string;
   body: string;
+  /** Versione HTML, solo se il testo usa la formattazione. */
+  html: string | null;
   attachments: string[];
   inReplyTo: string | null;
+}
+
+/** Messaggio in coda per "Invia più tardi". */
+export interface Scheduled {
+  id: string;
+  /** Secondi Unix. */
+  at: number;
+  outgoing: Outgoing;
+  attempts: number;
+  error: string | null;
 }
 
 export interface AccountPatch {
@@ -92,7 +106,11 @@ export interface Draft {
   accountId?: string;
   to: string[];
   cc?: string[];
+  bcc?: string[];
   subject: string;
   body: string;
+  attachments?: string[];
   inReplyTo: string | null;
+  /** Id del messaggio programmato che questa bozza sostituisce. */
+  replaces?: string;
 }
