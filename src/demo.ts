@@ -1,6 +1,6 @@
 // Dati di esempio del design, usati solo quando l'interfaccia gira nel browser senza Tauri.
 
-import type { Account, AccountPatch, Contact, Folder, Guess, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
+import type { Account, AccountPatch, Contact, Folder, Guess, HtmlView, Mailbox, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
 
 const tls = (host: string, port: number): Server => ({ host, port, security: "tls" });
 
@@ -21,15 +21,18 @@ const at = (daysAgo: number, h: number, m: number) => {
 const EMAIL = { personal: "eugenio@gmail.com", work: "eugenio@azienda.it", dev: "me@eugenio.dev" };
 const me = (email: string): Contact => ({ name: "Eugenio", email });
 
+const MIME: Record<string, string> = { PDF: "application/pdf", PNG: "image/png", TXT: "text/plain" };
+
 let uid = 0;
 const msg = (accountId: string, fromName: string, fromEmail: string, to: Contact[], date: number, unread: boolean, subject: string, body: string[], attachments: [string, number, string][] = [], flagged = false): Message => {
   uid += 1;
   const text = body.join("\n\n");
   return {
-    id: `${accountId}:inbox:${uid}`, accountId, folder: "inbox", mailbox: "INBOX", uid, messageId: `<demo-${uid}@missiva>`,
+    id: `${accountId}:inbox:${uid}`, accountId, folder: "inbox", mailbox: "INBOX", uid, messageId: `demo-${uid}@missiva`, inReplyTo: null, references: [],
     fromName, fromEmail, to, cc: [], subject, body: text, snippet: text.replace(/\s+/g, " ").slice(0, 180),
     date, unread, flagged,
-    attachments: attachments.map(([name, size, kind], index) => ({ index, name, size, kind })),
+    attachments: attachments.map(([name, size, kind], index) => ({ index, name, size, kind, mime: MIME[kind] ?? "application/octet-stream", inline: false })),
+    hasHtml: subject.startsWith("Numero 212"),
   };
 };
 
@@ -54,7 +57,116 @@ let inbox: Message[] = [
     ["Questa settimana: le novità dello scheduler, lo stato di Wayland sulle schede grafiche ibride e un confronto pratico tra file system.", "Buona lettura."]),
 ];
 
+// Una conversazione completa: la risposta inviata a Giulia e la replica di Marco.
+const nowSec = () => Math.floor(Date.now() / 1000);
+const sentCopy = (o: Outgoing, date: number): Message => ({
+  ...inbox[0],
+  id: `${o.accountId}:sent:${date}`,
+  accountId: o.accountId,
+  folder: "sent",
+  mailbox: "Sent Items",
+  messageId: o.messageId ?? `demo-sent-${date}@missiva`,
+  inReplyTo: o.inReplyTo,
+  references: o.references ?? [],
+  fromName: "Eugenio",
+  fromEmail: accounts.find((a) => a.id === o.accountId)?.email ?? "",
+  to: o.to.map((email) => ({ name: email, email })),
+  cc: [],
+  subject: o.subject,
+  body: o.body,
+  snippet: o.body.replace(/\s+/g, " ").slice(0, 180),
+  date,
+  unread: false,
+  flagged: false,
+  attachments: [],
+  hasHtml: false,
+});
+const gateway = inbox[0];
+let sentBox: Message[] = [
+  {
+    ...sentCopy(
+      { accountId: "work", to: [gateway.fromEmail], cc: [], bcc: [], subject: `Re: ${gateway.subject}`, body: "Grazie Giulia, ci guardo stasera.\n\nPer me il secondo scenario va bene, ne parliamo giovedì.", html: null, attachments: [], inReplyTo: gateway.messageId, references: [gateway.messageId!], messageId: "demo-900@missiva" },
+      gateway.date - 1500,
+    ),
+    to: [{ name: "Giulia Ferri", email: gateway.fromEmail }],
+  },
+];
+inbox.push({
+  ...gateway,
+  id: "work:inbox:901",
+  uid: 901,
+  messageId: "demo-901@missiva",
+  inReplyTo: "demo-900@missiva",
+  references: [gateway.messageId!, "demo-900@missiva"],
+  fromName: "Marco Valli",
+  fromEmail: "marco.valli@azienda.it",
+  subject: `Re: ${gateway.subject}`,
+  body: "D'accordo anche io sul secondo scenario.\n\nPreparo i numeri sul traffico dei servizi interni per giovedì.\n\nMarco",
+  snippet: "D'accordo anche io sul secondo scenario. Preparo i numeri sul traffico dei servizi interni per giovedì.",
+  date: gateway.date - 600,
+  unread: true,
+  flagged: false,
+  attachments: [],
+});
+// Il primo messaggio della conversazione è il più vecchio dei tre.
+inbox[0] = { ...gateway, date: gateway.date - 3600 };
+
 let scheduled: Scheduled[] = [];
+
+const box = (path: string, special: Folder | null = null, selectable = true): Mailbox => ({
+  path,
+  name: path.split("/").pop()!,
+  label: path.split("/").join(" / "),
+  delimiter: "/",
+  special,
+  selectable,
+});
+const MAILBOXES: Record<string, Mailbox[]> = {
+  work: [box("INBOX", "inbox"), box("Sent Items", "sent"), box("Drafts", "drafts"), box("Deleted Items", "trash"), box("Archive", "archive"), box("Clienti"), box("Clienti/Acme"), box("Clienti/Borealis"), box("Fatture 2026"), box("Junk Email")],
+  personal: [box("INBOX", "inbox"), box("[Gmail]", null, false), box("[Gmail]/Bozze", "drafts"), box("[Gmail]/Posta inviata", "sent"), box("[Gmail]/Cestino", "trash"), box("[Gmail]/Spam"), box("Viaggi"), box("Viaggi/Lisbona")],
+  dev: [box("INBOX", "inbox"), box("INBOX/CI"), box("Sent", "sent"), box("Trash", "trash")],
+};
+
+const NEWSLETTER_HTML = `<style type="text/css">
+  body { background: #f3efe6; } .wrap { max-width: 560px; margin: 0 auto; background: #fff; border-radius: 12px; overflow: hidden; }
+  .head { background: #1f2a44; color: #fff; padding: 24px; } h1 { margin: 0; font: 700 26px Georgia, serif; }
+  .item { padding: 16px 24px; border-bottom: 1px solid #eee; } a { color: #2563eb; }
+  @media (prefers-color-scheme: dark) { .item { color: #ffffff !important; } }
+</style>
+<div class="wrap">
+  <div class="head"><h1>Note dal kernel</h1><p>Numero 212 · settimana 44</p></div>
+  <img src="https://example.com/banner.png" alt="Banner remoto" width="560">
+  <div class="item"><b>Scheduler</b>: le novità di EEVDF e cosa cambia per i desktop. <a href="https://example.com/scheduler">Leggi</a></div>
+  <div class="item"><b>Wayland</b> sulle schede grafiche ibride: lo stato dei driver.</div>
+  <div class="item"><b>File system</b>: confronto pratico tra ext4, btrfs e bcachefs.</div>
+</div>`;
+
+/** PNG generato al volo per provare miniature e anteprime nel browser. */
+async function demoPng(label: string): Promise<ArrayBuffer> {
+  const canvas = new OffscreenCanvas(640, 400);
+  const g = canvas.getContext("2d")!;
+  g.fillStyle = "#1f2a44";
+  g.fillRect(0, 0, 640, 400);
+  g.fillStyle = "#c9f26b";
+  g.font = "bold 36px sans-serif";
+  g.fillText(label, 40, 210);
+  return (await canvas.convertToBlob({ type: "image/png" })).arrayBuffer();
+}
+
+/** PDF minimo di due pagine (pdf.js ricostruisce la tabella xref). */
+function demoPdf(title: string): ArrayBuffer {
+  const page = (n: number, text: string) =>
+    `${n} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents ${n + 1} 0 R >> endobj\n` +
+    `${n + 1} 0 obj << /Length ${text.length + 40} >> stream\nBT /F1 28 Tf 72 760 Td (${text}) Tj ET\nendstream endobj\n`;
+  const pdf =
+    "%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n" +
+    "2 0 obj << /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >> endobj\n" +
+    page(3, title) +
+    "5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n" +
+    page(6, "Pagina 2") +
+    "trailer << /Root 1 0 R >>\n%%EOF";
+  return new TextEncoder().encode(pdf).buffer as ArrayBuffer;
+}
 
 const wait = <T,>(v: T, ms = 300) => new Promise<T>((r) => setTimeout(() => r(v), ms));
 
@@ -75,13 +187,37 @@ export const demo = {
     accounts = accounts.map((a) => (a.id === patch.id ? { ...a, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) } : a));
     return wait(accounts.find((a) => a.id === patch.id)!, 0);
   },
+  reorderAccounts: (ids: string[]): Promise<Account[]> => {
+    const at = (a: Account) => (ids.includes(a.id) ? ids.indexOf(a.id) : Infinity);
+    accounts = [...accounts].sort((a, b) => at(a) - at(b));
+    return wait(accounts, 0);
+  },
+  mailboxes: (account: string) => wait(MAILBOXES[account] ?? [], 0),
+  syncMailbox: async (account: string, mailbox: string): Promise<SyncReport> => {
+    // Qualche messaggio dell'account, come se fosse stato spostato in quella cartella.
+    const picked = inbox.filter((m) => m.accountId === account).slice(0, mailbox.length % 2 ? 2 : 1);
+    const messages = picked.map((m) => ({ ...m, id: `${m.id}:${mailbox}`, folder: "other" as const, mailbox, unread: false }));
+    return wait({ messages, errors: [] }, 400);
+  },
+  messageHtml: (m: Message): Promise<HtmlView | null> => wait(m.hasHtml ? { html: NEWSLETTER_HTML, remote: true } : null, 150),
+  attachmentBytes: async (m: Message, index: number): Promise<ArrayBuffer> => {
+    const f = m.attachments[index];
+    await wait(null, 250);
+    if (f.mime.startsWith("image/")) return demoPng(f.name);
+    if (f.mime === "application/pdf") return demoPdf(f.name);
+    return new TextEncoder().encode(`Contenuto di ${f.name}`).buffer as ArrayBuffer;
+  },
   removeAccount: (id: string) => {
     accounts = accounts.filter((a) => a.id !== id);
     inbox = inbox.filter((m) => m.accountId !== id);
     return wait(undefined, 0);
   },
-  messages: (folder: Folder) => wait(folder === "inbox" ? inbox.filter((m) => accounts.some((a) => a.id === m.accountId)) : [], 0),
-  sync: async (folder: Folder): Promise<SyncReport> => ({ messages: await demo.messages(folder).then((m) => wait(m, 1200)), errors: [] }),
+  messages: (folder: Folder) =>
+    wait((folder === "inbox" ? inbox : folder === "sent" ? sentBox : []).filter((m) => accounts.some((a) => a.id === m.accountId)), 0),
+  sync: async (folder: Folder, account?: string): Promise<SyncReport> => ({
+    messages: (await demo.messages(folder).then((m) => wait(m, 1200))).filter((m) => !account || m.accountId === account),
+    errors: [],
+  }),
   setFlags: (m: Message, flags: { seen?: boolean; flagged?: boolean }) => {
     inbox = inbox.map((x) => (x.id === m.id ? { ...x, unread: flags.seen === undefined ? x.unread : !flags.seen, flagged: flags.flagged ?? x.flagged } : x));
     return wait(undefined, 0);
@@ -90,7 +226,11 @@ export const demo = {
     inbox = inbox.filter((x) => x.id !== m.id);
     return wait(undefined, 200);
   },
-  send: (o: Outgoing) => (o.to.length ? wait(undefined, 800) : Promise.reject("Aggiungi almeno un destinatario")),
+  send: (o: Outgoing) => {
+    if (!o.to.length) return Promise.reject("Aggiungi almeno un destinatario");
+    sentBox = [...sentBox, sentCopy(o, nowSec())];
+    return wait(undefined, 800);
+  },
   schedule: (outgoing: Outgoing, at: number) => {
     const s: Scheduled = { id: crypto.randomUUID(), at, outgoing, attempts: 0, error: null };
     scheduled = [...scheduled, s];

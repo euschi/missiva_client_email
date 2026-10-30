@@ -16,6 +16,8 @@ export interface Prefs {
   /** Chiudere la finestra la nasconde nell'area di notifica. */
   closeToTray: boolean;
   markReadOnOpen: boolean;
+  /** Carica subito immagini e stili remoti nei messaggi HTML. */
+  remoteImages: boolean;
 }
 
 export const PRESETS = [
@@ -38,6 +40,7 @@ export const DEFAULT_PREFS: Prefs = {
   notifyPreview: true,
   closeToTray: true,
   markReadOnOpen: true,
+  remoteImages: false,
 };
 
 const KEY = "missiva.prefs";

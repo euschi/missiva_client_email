@@ -2,8 +2,9 @@
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { demo } from "./demo";
-import type { Account, AccountPatch, Folder, Guess, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
+import type { Account, AccountPatch, Folder, Guess, HtmlView, Mailbox, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
 
 export const inTauri = isTauri();
 
@@ -23,11 +24,25 @@ export const api = {
 
   updateAccount: (patch: AccountPatch): Promise<Account> => (inTauri ? invoke("update_account", { patch }) : demo.updateAccount(patch)),
 
+  reorderAccounts: (ids: string[]): Promise<Account[]> => (inTauri ? invoke("reorder_accounts", { ids }) : demo.reorderAccounts(ids)),
+
   removeAccount: (id: string): Promise<void> => (inTauri ? invoke("remove_account", { id }) : demo.removeAccount(id)),
 
   cachedMessages: (folder: Folder): Promise<Message[]> => (inTauri ? invoke("cached_messages", { folder }) : demo.messages(folder)),
 
-  syncFolder: (folder: Folder): Promise<SyncReport> => (inTauri ? invoke("sync_folder", { folder }) : demo.sync(folder)),
+  /** Senza `account` sincronizza la cartella su tutti gli account. */
+  syncFolder: (folder: Folder, account?: string): Promise<SyncReport> =>
+    inTauri ? invoke("sync_folder", { folder, account: account ?? null }) : demo.sync(folder, account),
+
+  /** Cartelle dell'utente: dalla cache, o dal server con `refresh`. */
+  mailboxes: (account: string, refresh: boolean): Promise<Mailbox[]> =>
+    inTauri ? invoke("mailboxes", { account, refresh }) : demo.mailboxes(account),
+
+  cachedMailbox: (account: string, mailbox: string): Promise<Message[]> =>
+    inTauri ? invoke("cached_mailbox", { account, mailbox }) : Promise.resolve([]),
+
+  syncMailbox: (account: string, mailbox: string): Promise<SyncReport> =>
+    inTauri ? invoke("sync_mailbox", { account, mailbox }) : demo.syncMailbox(account, mailbox),
 
   setFlags: (m: Message, flags: { seen?: boolean; flagged?: boolean }): Promise<void> =>
     inTauri ? invoke("set_flags", { target: ref(m), seen: flags.seen ?? null, flagged: flags.flagged ?? null }) : demo.setFlags(m, flags),
@@ -51,6 +66,14 @@ export const api = {
 
   openAttachment: (m: Message, index: number): Promise<string> =>
     inTauri ? invoke("open_attachment", { target: ref(m), index }) : Promise.resolve(m.attachments[index]?.name ?? ""),
+
+  messageHtml: (m: Message): Promise<HtmlView | null> => (inTauri ? invoke("message_html", { target: ref(m) }) : demo.messageHtml(m)),
+
+  attachmentBytes: (m: Message, index: number): Promise<ArrayBuffer> =>
+    inTauri ? invoke("attachment_bytes", { target: ref(m), index }) : demo.attachmentBytes(m, index),
+
+  /** Link http(s) nel browser di sistema. */
+  openLink: (url: string): Promise<void> => (inTauri ? openUrl(url) : (window.open(url, "_blank", "noopener"), Promise.resolve())),
 
   clearCache: (): Promise<void> => (inTauri ? invoke("clear_cache") : Promise.resolve()),
 

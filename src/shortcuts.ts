@@ -32,6 +32,14 @@ export const SHORTCUTS: { group: string; items: { keys: string[]; label: string 
     ],
   },
   {
+    group: "Account nella barra laterale",
+    items: [
+      { keys: ["F2"], label: "Rinomina l'account selezionato" },
+      { keys: ["Alt", "↑"], label: "Sposta l'account in su" },
+      { keys: ["Alt", "↓"], label: "Sposta l'account in giù" },
+    ],
+  },
+  {
     group: "Scrivi",
     items: [
       { keys: ["Ctrl", "↵"], label: "Invia" },

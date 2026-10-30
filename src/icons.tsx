@@ -42,6 +42,10 @@ const PATHS = {
   tray: "M2 4h20v12H2z M8 20h8 M12 16v4",
   keys: "M2 6h20v12H2z M6 10h.01 M10 10h.01 M14 10h.01 M18 10h.01 M7 14h10",
   alert: "M12 9v4 M12 17h.01 M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z",
+  more: "M5 12h.01 M12 12h.01 M19 12h.01",
+  folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+  arrowUp: "M12 19V5 M6 11l6-6 6 6",
+  arrowDown: "M12 5v14 M6 13l6 6 6-6",
   markUnread: "M22 6v12H2V6 M22 6l-10 7L2 6 M19 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
 } as const;
 

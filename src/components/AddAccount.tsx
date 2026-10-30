@@ -96,15 +96,34 @@ export function AddAccount({ onClose, onAdded }: Props) {
     setLookup({ domain, found: g.found });
   };
 
+  // Ogni tentativo ha un numero: dopo «Annulla» la risposta di quello vecchio si ignora.
+  const attempt = useRef(0);
   const run = async (task: () => Promise<Account>) => {
+    const mine = ++attempt.current;
     setBusy(true);
     setError(null);
     try {
-      onAdded(await task());
+      const account = await task();
+      if (mine === attempt.current) onAdded(account);
     } catch (e) {
+      if (mine !== attempt.current) return;
       setError(errorText(e));
       setBusy(false);
     }
+  };
+  const cancel = () => {
+    attempt.current += 1;
+    setBusy(false);
+  };
+
+  /** Gmail via IMAP con password per le app: funziona con qualsiasi account, senza OAuth. */
+  const useGmailAppPassword = () => {
+    cancel();
+    setProv("imap");
+    setError(null);
+    setImap({ host: "imap.gmail.com", port: 993, security: "tls" });
+    setSmtp({ host: "smtp.gmail.com", port: 465, security: "tls" });
+    setLookup({ domain: "gmail.com", found: true });
   };
 
   const oauth = prov !== "imap" ? OAUTH[prov] : null;
@@ -167,12 +186,41 @@ export function AddAccount({ onClose, onAdded }: Props) {
               </fieldset>
               {error && <div className="status error" role="alert"><span>{error}</span></div>}
               <div className="stack-10">
-                <button type="button" className="btn btn-primary" style={{ alignSelf: "flex-start", height: 46 }} disabled={busy} onClick={() => run(() => api.addOauthAccount(prov, days))}>
-                  {busy ? "In attesa del browser…" : "Continua nel browser"}
-                  <Icon name="external" size={15} stroke={2} />
-                </button>
+                <div className="foot-actions" style={{ justifyContent: "flex-start" }}>
+                  <button type="button" className="btn btn-primary" style={{ height: 46 }} disabled={busy} onClick={() => run(() => api.addOauthAccount(prov, days))}>
+                    {busy ? "In attesa del browser…" : "Continua nel browser"}
+                    <Icon name="external" size={15} stroke={2} />
+                  </button>
+                  {busy && (
+                    <button type="button" className="btn btn-soft" style={{ height: 46 }} onClick={cancel}>
+                      Annulla
+                    </button>
+                  )}
+                </div>
                 <span className="mono" style={{ fontSize: 11.5, color: "var(--text-6)" }}>Si aprirà {oauth.host} nel browser predefinito</span>
               </div>
+              {prov === "google" && (
+                <div className="status info fallback">
+                  <Icon name="alert" size={16} stroke={2} />
+                  <span className="stack-6">
+                    <strong>Google blocca l’accesso?</strong>
+                    <span>
+                      Se compare «Accesso bloccato» o «app non verificata», collega Gmail con una <b>password per le app</b>: funziona con qualsiasi account Google
+                      che abbia la verifica in due passaggi attiva.
+                    </span>
+                    <span className="foot-actions" style={{ justifyContent: "flex-start" }}>
+                      <button type="button" className="btn btn-soft btn-sm" onClick={() => api.openLink("https://myaccount.google.com/apppasswords")}>
+                        Crea una password per le app
+                        <Icon name="external" size={13} stroke={2} />
+                      </button>
+                      <button type="button" className="btn btn-soft btn-sm" onClick={useGmailAppPassword}>
+                        Usa la password per le app
+                        <Icon name="arrow" size={13} stroke={2} />
+                      </button>
+                    </span>
+                  </span>
+                </div>
+              )}
             </div>
           ) : (
             <form

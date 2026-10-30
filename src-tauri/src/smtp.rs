@@ -28,6 +28,18 @@ pub struct Outgoing {
     #[serde(default)]
     pub attachments: Vec<String>,
     pub in_reply_to: Option<String>,
+    /// Catena della conversazione (header References), dal messaggio più vecchio.
+    #[serde(default)]
+    pub references: Vec<String>,
+    /// Message-ID scelto da Missiva, per riconoscere subito la risposta nella conversazione.
+    #[serde(default)]
+    pub message_id: Option<String>,
+}
+
+/// Gli id nelle intestazioni vanno tra parentesi angolari (RFC 5322).
+fn angle(id: &str) -> String {
+    let id = id.trim().trim_start_matches('<').trim_end_matches('>');
+    format!("<{id}>")
 }
 
 pub fn build(acc: &Account, out: &Outgoing) -> Result<Message> {
@@ -43,8 +55,18 @@ pub fn build(acc: &Account, out: &Outgoing) -> Result<Message> {
     for bcc in &out.bcc {
         b = b.bcc(bcc.parse()?);
     }
+    if let Some(id) = &out.message_id {
+        b = b.message_id(Some(angle(id)));
+    }
+    let mut refs: Vec<String> = out.references.iter().map(|r| angle(r)).collect();
     if let Some(id) = &out.in_reply_to {
-        b = b.in_reply_to(id.clone()).references(id.clone());
+        b = b.in_reply_to(angle(id));
+        if !refs.contains(&angle(id)) {
+            refs.push(angle(id));
+        }
+    }
+    if !refs.is_empty() {
+        b = b.references(refs.join(" "));
     }
 
     let signed = !acc.signature.trim().is_empty();
