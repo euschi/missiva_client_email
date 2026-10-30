@@ -24,10 +24,12 @@ interface Props {
   labelsOf: (m: Message) => Label[];
   /** Ora di riapparizione (posticipati) o di invio (programmati). */
   wakeOf: (m: Message) => number | undefined;
+  /** Messaggi nella conversazione di `m`. */
+  threadSize: (m: Message) => number;
   empty: { title: string; text: string; action?: { label: string; run: () => void } };
 }
 
-export function MessageList({ title, subtitle, chip, onChip, messages, accounts, selectedId, onSelect, labelsOf, wakeOf, empty }: Props) {
+export function MessageList({ title, subtitle, chip, onChip, messages, accounts, selectedId, onSelect, labelsOf, wakeOf, threadSize, empty }: Props) {
   const groups: { label: string; items: Message[] }[] = [];
   for (const m of messages) {
     const label = groupLabel(m.date);
@@ -92,6 +94,7 @@ export function MessageList({ title, subtitle, chip, onChip, messages, accounts,
                     <span className="row-top">
                       {m.unread && <span className="unread-dot" aria-label="Non letto" />}
                       <span className="row-from">{m.fromName}</span>
+                      {threadSize(m) > 1 && <span className="row-thread" aria-label={`${threadSize(m)} messaggi nella conversazione`}>{threadSize(m)}</span>}
                       {m.flagged && <Icon name="star" size={12} fill="currentColor" label="Contrassegnato" />}
                       {m.attachments.length > 0 && <Icon name="clip" size={13} stroke={2} label="Allegato" />}
                       <span className="row-time">{shortTime(m.date)}</span>

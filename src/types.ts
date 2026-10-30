@@ -2,7 +2,29 @@
 
 export type Provider = "google" | "microsoft" | "imap";
 export type Security = "tls" | "starttls";
-export type Folder = "inbox" | "drafts" | "sent" | "archive" | "trash";
+/** "other" è una cartella creata dall'utente: la casella IMAP vera è in `Message.mailbox`. */
+export type Folder = "inbox" | "drafts" | "sent" | "archive" | "trash" | "other";
+
+/** Cartella creata dall'utente sul server. */
+export interface Mailbox {
+  /** Nome IMAP esatto, da usare con il server. */
+  path: string;
+  /** Ultima parte del percorso, leggibile. */
+  name: string;
+  /** Percorso leggibile completo («Clienti / Acme»). */
+  label: string;
+  delimiter: string;
+  /** Cartella speciale che Missiva gestisce già (posta in arrivo, inviati…). */
+  special: Folder | null;
+  /** Falso per i soli contenitori (es. «[Gmail]»). */
+  selectable: boolean;
+}
+
+/** Cartella dell'utente aperta nell'elenco. */
+export interface OpenBox {
+  accountId: string;
+  mailbox: Mailbox;
+}
 
 export interface Server {
   host: string;
@@ -29,6 +51,16 @@ export interface Attachment {
   name: string;
   size: number;
   kind: string;
+  /** Tipo MIME, per scegliere l'anteprima. */
+  mime: string;
+  /** Immagine già mostrata dentro l'HTML del messaggio. */
+  inline: boolean;
+}
+
+export interface HtmlView {
+  html: string;
+  /** Contiene immagini o stili caricati da internet. */
+  remote: boolean;
 }
 
 export interface Contact {
@@ -43,6 +75,10 @@ export interface Message {
   mailbox: string;
   uid: number;
   messageId: string | null;
+  /** Message-ID a cui risponde. */
+  inReplyTo: string | null;
+  /** Catena della conversazione, dal messaggio più vecchio. */
+  references: string[];
   fromName: string;
   fromEmail: string;
   to: Contact[];
@@ -55,6 +91,8 @@ export interface Message {
   unread: boolean;
   flagged: boolean;
   attachments: Attachment[];
+  /** Ha una parte HTML da mostrare al posto del testo. */
+  hasHtml: boolean;
   /** Solo lato interfaccia: il messaggio è in coda di invio. */
   scheduled?: Scheduled;
 }
@@ -81,6 +119,10 @@ export interface Outgoing {
   html: string | null;
   attachments: string[];
   inReplyTo: string | null;
+  /** Catena della conversazione (header References). */
+  references?: string[];
+  /** Message-ID scelto in anticipo: la copia locale e quella del server coincidono. */
+  messageId?: string | null;
 }
 
 /** Messaggio in coda per "Invia più tardi". */
@@ -111,6 +153,7 @@ export interface Draft {
   body: string;
   attachments?: string[];
   inReplyTo: string | null;
+  references?: string[];
   /** Id del messaggio programmato che questa bozza sostituisce. */
   replaces?: string;
 }

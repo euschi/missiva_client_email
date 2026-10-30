@@ -11,7 +11,7 @@ interface Props {
   accounts: Account[];
   draft: Draft;
   onClose: () => void;
-  onSent: (account: Account) => void;
+  onSent: (account: Account, outgoing: Outgoing) => void;
   onScheduled: (account: Account, at: number) => void;
 }
 
@@ -108,14 +108,26 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled }: Props
     await new Promise((r) => setTimeout(r, 0));
     setError(null);
     setSending(true);
-    const outgoing: Outgoing = { accountId: from.id, to, cc, bcc, subject, body, html: formatted ? toHtml(body) : null, attachments: files, inReplyTo: draft.inReplyTo };
+    const outgoing: Outgoing = {
+      accountId: from.id,
+      to,
+      cc,
+      bcc,
+      subject,
+      body,
+      html: formatted ? toHtml(body) : null,
+      attachments: files,
+      inReplyTo: draft.inReplyTo,
+      references: draft.references ?? [],
+      messageId: `${crypto.randomUUID()}@${from.email.split("@")[1] || "missiva.local"}`,
+    };
     try {
       if (at) {
         await api.scheduleMessage(outgoing, at);
         onScheduled(from, at);
       } else {
         await api.sendMessage(outgoing);
-        onSent(from);
+        onSent(from, outgoing);
       }
     } catch (e) {
       setError(errorText(e));

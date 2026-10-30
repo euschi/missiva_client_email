@@ -416,13 +416,19 @@ function Privacy({ prefs, onPrefs, onClearCache }: PrefsProps & { onClearCache: 
           checked={prefs.markReadOnOpen}
           onChange={(markReadOnOpen) => onPrefs({ ...prefs, markReadOnOpen })}
         />
+        <Toggle
+          title="Carica le immagini remote"
+          desc="Se disattivato, immagini e stili da internet restano bloccati finché non premi «Mostra» nel messaggio: i pixel di tracciamento non sanno quando apri la posta."
+          checked={prefs.remoteImages}
+          onChange={(remoteImages) => onPrefs({ ...prefs, remoteImages })}
+        />
       </div>
       <div className="settings-list">
         <div className="setting-row">
           <Icon name="shield" size={18} />
           <span className="setting-text">
-            <span className="setting-title">Nessun contenuto remoto</span>
-            <span className="setting-desc">I messaggi si leggono come testo: immagini remote e pixel di tracciamento non vengono mai scaricati.</span>
+            <span className="setting-title">Messaggi HTML isolati</span>
+            <span className="setting-desc">L’HTML dei messaggi gira senza script e i link si aprono nel browser di sistema.</span>
           </span>
         </div>
         <div className="setting-row">
