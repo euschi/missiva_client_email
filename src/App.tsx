@@ -5,7 +5,8 @@ import { api, errorText, inTauri } from "./api";
 import { AddAccount } from "./components/AddAccount";
 import { Compose } from "./components/Compose";
 import { MessageList, type Chip } from "./components/MessageList";
-import { Reader } from "./components/Reader";
+import { nextLabelColor } from "./components/Pickers";
+import { Reader, type ReaderMenu } from "./components/Reader";
 import { Settings, type Section } from "./components/Settings";
 import { Sidebar, VIEWS, type View } from "./components/Sidebar";
 import { TitleBar } from "./components/TitleBar";
@@ -13,7 +14,8 @@ import { longTime, plural, relativeSync } from "./format";
 import { Icon } from "./icons";
 import { notifyNewMail } from "./notify";
 import { applyPrefs, loadPrefs, savePrefs, type Prefs } from "./prefs";
-import type { Account, Draft, Folder, Message } from "./types";
+import { keyOf, useStore, type Labels, type Snooze } from "./store";
+import type { Account, Draft, Folder, Message, Scheduled } from "./types";
 
 type ModalState =
   | { kind: "compose"; draft: Draft }
@@ -22,7 +24,36 @@ type ModalState =
 
 const SYNC_EVERY_MS = 5 * 60_000;
 
-const folderOf = (v: View): Folder => (v === "flagged" ? "inbox" : v);
+const folderOf = (v: View): Folder => (v === "flagged" || v === "snoozed" || v === "scheduled" ? "inbox" : v);
+const nowSec = () => Math.floor(Date.now() / 1000);
+
+/** Un messaggio in coda di invio, mostrato nell'elenco come gli altri. */
+const scheduledMessage = (s: Scheduled): Message => {
+  const o = s.outgoing;
+  return {
+    id: `scheduled:${s.id}`,
+    accountId: o.accountId,
+    folder: "drafts",
+    mailbox: "",
+    uid: 0,
+    messageId: null,
+    fromName: `A: ${o.to.join(", ")}`,
+    fromEmail: "",
+    to: o.to.map((email) => ({ name: email, email })),
+    cc: o.cc.map((email) => ({ name: email, email })),
+    subject: o.subject || "(senza oggetto)",
+    snippet: o.body.replace(/\s+/g, " ").slice(0, 180),
+    body: o.body,
+    date: s.at,
+    unread: false,
+    flagged: false,
+    attachments: o.attachments.map((path, index) => {
+      const name = path.split("/").pop() ?? path;
+      return { index, name, size: 0, kind: (name.split(".").pop() ?? "FILE").slice(0, 4).toUpperCase() };
+    }),
+    scheduled: s,
+  };
+};
 const byDateDesc = (a: Message, b: Message) => b.date - a.date;
 const prefixed = (prefix: string, s: string) => (s.toLowerCase().startsWith(prefix.toLowerCase()) ? s : `${prefix} ${s}`);
 const quote = (m: Message) => `\n\nIl ${longTime(m.date)}, ${m.fromName} <${m.fromEmail}> ha scritto:\n` + m.body.split("\n").map((l) => `> ${l}`).join("\n");
@@ -44,6 +75,11 @@ export function App() {
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null);
   const [, setTick] = useState(0);
   const [trayAvailable, setTrayAvailable] = useState(false);
+  const [labelFilter, setLabelFilter] = useState<string | null>(null);
+  const [menu, setMenu] = useState<ReaderMenu>(null);
+  const [scheduled, setScheduled] = useState<Scheduled[]>([]);
+  const [snoozed, setSnoozed] = useStore<Record<string, Snooze>>("snoozed", {});
+  const [labels, setLabels] = useStore<Labels>("labels", { defs: [], byMessage: {} });
   const searchRef = useRef<HTMLInputElement>(null);
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
@@ -122,6 +158,21 @@ export function App() {
     };
   }, [view, accounts.length, sync]);
 
+  const loadScheduled = useCallback(() => api.listScheduled().then(setScheduled, () => {}), []);
+  useEffect(() => {
+    loadScheduled();
+    if (!inTauri) return;
+    const off = listen<{ subject: string; error: string | null }>("outbox-changed", (e) => {
+      loadScheduled();
+      const subject = e.payload.subject || "(senza oggetto)";
+      if (e.payload.error) notify(`«${subject}» non è partito: ${e.payload.error}`, true);
+      else notify(`Messaggio programmato inviato: «${subject}»`);
+    });
+    return () => {
+      off.then((f) => f());
+    };
+  }, [loadScheduled, notify]);
+
   // Area di notifica: disponibilità, voce "Sincronizza ora" e chiusura che nasconde la finestra.
   useEffect(() => {
     if (!inTauri) return;
@@ -145,18 +196,34 @@ export function App() {
   const changeView = (v: View) => {
     setView(v);
     setSelectedId(null);
+    setMenu(null);
+    if (v === "scheduled") loadScheduled();
     const folder = folderOf(v);
     if (folder !== "inbox" || !byFolder.inbox) loadFolder(folder);
   };
 
-  // Elenco visibile: cartella, account, filtro rapido e ricerca.
-  const inbox = byFolder.inbox ?? [];
+  // Posticipi ed etichette sono legati alla chiave del messaggio.
+  const now = nowSec();
+  const snoozeOf = (m: Message) => (m.folder === "inbox" && snoozed[keyOf(m)]?.until > now ? snoozed[keyOf(m)].until : undefined);
+  const labelsOf = (m: Message) => (labels.byMessage[keyOf(m)] ?? []).map((id) => labels.defs.find((l) => l.id === id)).filter((l) => l !== undefined);
+
+  // Elenco visibile: cartella, account, filtro rapido, etichetta e ricerca.
+  const inbox = (byFolder.inbox ?? []).filter((m) => !snoozeOf(m));
   const q = query.trim().toLowerCase();
-  const visible = (byFolder[folderOf(view)] ?? []).filter(
+  const source =
+    view === "scheduled"
+      ? scheduled.map(scheduledMessage).sort((a, b) => a.date - b.date)
+      : view === "snoozed"
+        ? (byFolder.inbox ?? []).filter((m) => snoozeOf(m)).sort((a, b) => snoozeOf(a)! - snoozeOf(b)!)
+        : view === "inbox"
+          ? inbox
+          : (byFolder[folderOf(view)] ?? []);
+  const visible = source.filter(
     (m) =>
       accountsById[m.accountId] &&
       (accountFilter === "all" || m.accountId === accountFilter) &&
       (view !== "flagged" || m.flagged) &&
+      (!labelFilter || labelsOf(m).some((l) => l.id === labelFilter)) &&
       (chip !== "unread" || m.unread) &&
       (chip !== "attach" || m.attachments.length > 0) &&
       (!q || [m.fromName, m.fromEmail, m.subject, m.body].some((s) => s.toLowerCase().includes(q))),
@@ -173,8 +240,25 @@ export function App() {
   const counts = {
     inbox: inbox.filter((m) => m.unread && inFilter(m)).length,
     flagged: inbox.filter((m) => m.flagged && inFilter(m)).length,
+    snoozed: (byFolder.inbox ?? []).filter((m) => snoozeOf(m) && inFilter(m)).length,
+    scheduled: scheduled.filter((s) => accountFilter === "all" || s.outgoing.accountId === accountFilter).length,
     drafts: (byFolder.drafts ?? []).filter(inFilter).length,
   };
+  const labelCounts = Object.fromEntries(labels.defs.map((l) => [l.id, Object.values(labels.byMessage).filter((ids) => ids.includes(l.id)).length]));
+
+  // Allo scadere del posticipo il messaggio torna in arrivo come non letto, con notifica.
+  useEffect(() => {
+    // Dopo la prima sincronizzazione, che altrimenti riscriverebbe lo stato "letto".
+    if (!byFolder.inbox || !lastSync || syncing) return;
+    const due = Object.entries(snoozed).filter(([, s]) => s.until <= now);
+    if (due.length === 0) return;
+    const back = byFolder.inbox.filter((m) => due.some(([k]) => k === keyOf(m)));
+    for (const m of back) {
+      if (!m.unread) markUnread(m);
+    }
+    if (back.length && prefs.notify) notifyNewMail(back, prefs.notifyPreview);
+    setSnoozed(Object.fromEntries(Object.entries(snoozed).filter(([, s]) => s.until > now)));
+  });
 
   // ---------- Azioni sui messaggi ----------
 
@@ -236,7 +320,7 @@ export function App() {
 
   const quickReply = async (m: Message, text: string) => {
     try {
-      await api.sendMessage({ accountId: m.accountId, to: [m.fromEmail], cc: [], bcc: [], subject: prefixed("Re:", m.subject), body: text + quote(m), attachments: [], inReplyTo: m.messageId });
+      await api.sendMessage({ accountId: m.accountId, to: [m.fromEmail], cc: [], bcc: [], subject: prefixed("Re:", m.subject), body: text + quote(m), html: null, attachments: [], inReplyTo: m.messageId });
       notify(`Risposta inviata a ${m.fromName}`);
       return true;
     } catch (e) {
@@ -252,6 +336,63 @@ export function App() {
     } catch (e) {
       notify(errorText(e), true);
     }
+  };
+
+  const snooze = (m: Message, until: number) => {
+    const i = visible.findIndex((x) => x.id === m.id);
+    setSelectedId(visible[i + 1]?.id ?? visible[i - 1]?.id ?? null);
+    setSnoozed({ ...snoozed, [keyOf(m)]: { until, accountId: m.accountId } });
+    notify(`Posticipato: torna ${longTime(until).toLowerCase()}`);
+  };
+
+  const unsnooze = (m: Message) => {
+    const rest = { ...snoozed };
+    delete rest[keyOf(m)];
+    setSnoozed(rest);
+    notify("Messaggio riportato in arrivo");
+  };
+
+  const toggleLabel = (m: Message, id: string) => {
+    const k = keyOf(m);
+    const current = labels.byMessage[k] ?? [];
+    const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
+    const byMessage = { ...labels.byMessage, [k]: next };
+    if (next.length === 0) delete byMessage[k];
+    setLabels({ ...labels, byMessage });
+  };
+
+  const createLabel = (m: Message, name: string) => {
+    const label = { id: crypto.randomUUID(), name, color: nextLabelColor(labels.defs) };
+    const k = keyOf(m);
+    setLabels({ defs: [...labels.defs, label], byMessage: { ...labels.byMessage, [k]: [...(labels.byMessage[k] ?? []), label.id] } });
+  };
+
+  const sendScheduled = async (sc: Scheduled) => {
+    try {
+      await api.sendScheduledNow(sc.id);
+      notify(`Messaggio inviato: «${sc.outgoing.subject || "(senza oggetto)"}»`);
+    } catch (e) {
+      notify(errorText(e), true);
+    }
+    loadScheduled();
+  };
+
+  const cancelScheduled = async (sc: Scheduled) => {
+    await api.cancelScheduled(sc.id).catch((e) => notify(errorText(e), true));
+    loadScheduled();
+    notify("Invio annullato");
+  };
+
+  // La bozza sostituisce il programmato solo quando viene inviata o riprogrammata.
+  const editScheduled = (sc: Scheduled) => {
+    const o = sc.outgoing;
+    compose({ accountId: o.accountId, to: o.to, cc: o.cc, bcc: o.bcc, subject: o.subject, body: o.body, attachments: o.attachments, inReplyTo: o.inReplyTo, replaces: sc.id });
+  };
+
+  const draftDone = async (draft: Draft) => {
+    setModal(null);
+    if (draft.replaces) await api.cancelScheduled(draft.replaces).catch(() => {});
+    loadScheduled();
   };
 
   // ---------- Account ----------
@@ -275,7 +416,7 @@ export function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (modal) return;
+      if (modal || menu) return;
       const typing = e.target instanceof HTMLElement && e.target.closest("input, textarea, select, [contenteditable]");
       if (e.ctrlKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -294,8 +435,13 @@ export function App() {
           j: () => step(1),
           k: () => step(-1),
         };
-        if (selected) {
+        if (selected?.scheduled) {
+          const sc = selected.scheduled;
+          Object.assign(actions, { delete: () => cancelScheduled(sc) });
+        } else if (selected) {
           Object.assign(actions, {
+            b: () => selected.folder === "inbox" && setMenu("snooze"),
+            l: () => setMenu("label"),
             r: () => reply(selected, false),
             a: () => reply(selected, true),
             f: () => forward(selected),
@@ -326,9 +472,18 @@ export function App() {
       : relativeSync(lastSync);
 
   const title = VIEWS.find((v) => v.id === view)!.label;
-  const scope = accountFilter === "all" ? "Tutti gli account" : `${accountsById[accountFilter]?.name} · ${accountsById[accountFilter]?.email}`;
+  const activeLabel = labels.defs.find((l) => l.id === labelFilter);
+  const scope =
+    (accountFilter === "all" ? "Tutti gli account" : `${accountsById[accountFilter]?.name} · ${accountsById[accountFilter]?.email}`) +
+    (activeLabel ? ` · ${activeLabel.name}` : "");
   const unread = visible.filter((m) => m.unread).length;
-  const subtitle = q ? `${plural(visible.length, "risultato", "risultati")} per «${query.trim()}»` : `${scope} · ${plural(unread, "non letto", "non letti")}`;
+  const tally =
+    view === "scheduled"
+      ? plural(visible.length, "in coda", "in coda")
+      : view === "snoozed"
+        ? plural(visible.length, "posticipato", "posticipati")
+        : plural(unread, "non letto", "non letti");
+  const subtitle = q ? `${plural(visible.length, "risultato", "risultati")} per «${query.trim()}»` : `${scope} · ${tally}`;
 
   const empty =
     loaded && accounts.length === 0
@@ -337,7 +492,13 @@ export function App() {
         ? { title: "Nessun risultato", text: "Prova con un altro nome, oggetto o parola del testo." }
         : syncing && !byFolder[folderOf(view)]
           ? { title: "Sincronizzo…", text: "Scarico i messaggi dai server." }
-          : { title: "Tutto in ordine", text: "Non ci sono messaggi qui." };
+          : view === "snoozed"
+            ? { title: "Niente in attesa", text: "Con Posticipa (B) un messaggio sparisce da Posta in arrivo e torna all’ora che scegli." }
+            : view === "scheduled"
+              ? { title: "Nessun invio in coda", text: "Nella finestra Scrivi usa l’orologio accanto a Invia per programmare un messaggio." }
+              : activeLabel
+                ? { title: "Nessun messaggio", text: `Nessun messaggio con l’etichetta «${activeLabel.name}» in questa cartella.` }
+                : { title: "Tutto in ordine", text: "Non ci sono messaggi qui." };
 
   return (
     <div className="app">
@@ -364,6 +525,13 @@ export function App() {
           counts={counts}
           unreadByAccount={unreadByAccount}
           errors={errors}
+          labels={labels.defs}
+          labelCounts={labelCounts}
+          labelFilter={labelFilter}
+          onLabelFilter={(id) => {
+            setLabelFilter(id);
+            setSelectedId(null);
+          }}
           onCompose={() => compose()}
           onAddAccount={() => setModal({ kind: "account" })}
           onSettings={() => setModal({ kind: "settings", section: "look" })}
@@ -377,6 +545,8 @@ export function App() {
           accounts={accountsById}
           selectedId={selected?.id ?? null}
           onSelect={select}
+          labelsOf={labelsOf}
+          wakeOf={(m) => m.scheduled?.at ?? snoozeOf(m)}
           empty={empty}
         />
         <Reader
@@ -390,6 +560,18 @@ export function App() {
           onForward={forward}
           onQuickReply={quickReply}
           onOpenAttachment={openAttachment}
+          menu={menu}
+          onMenu={setMenu}
+          labels={labels.defs}
+          messageLabels={selected ? labelsOf(selected) : []}
+          onToggleLabel={toggleLabel}
+          onCreateLabel={createLabel}
+          snoozedUntil={selected ? snoozeOf(selected) : undefined}
+          onSnooze={snooze}
+          onUnsnooze={unsnooze}
+          onSendScheduled={sendScheduled}
+          onEditScheduled={editScheduled}
+          onCancelScheduled={cancelScheduled}
         />
       </div>
 
@@ -399,8 +581,12 @@ export function App() {
           draft={modal.draft}
           onClose={() => setModal(null)}
           onSent={(a) => {
-            setModal(null);
+            draftDone(modal.draft);
             notify(`Messaggio inviato da ${a.name}`);
+          }}
+          onScheduled={(a, at) => {
+            draftDone(modal.draft);
+            notify(`Programmato: parte ${longTime(at).toLowerCase()} da ${a.name}`);
           }}
         />
       )}
@@ -415,6 +601,8 @@ export function App() {
           onAccountRemoved={accountRemoved}
           onAddAccount={() => setModal({ kind: "account" })}
           trayAvailable={trayAvailable}
+          labels={labels}
+          onLabels={setLabels}
           onClearCache={async () => {
             await api.clearCache();
             setByFolder({});

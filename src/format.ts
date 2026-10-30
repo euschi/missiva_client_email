@@ -14,7 +14,11 @@ const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 export function shortTime(ts: number): string {
   const d = new Date(ts * 1000);
   const n = daysAgo(ts);
-  if (n <= 0) return hm(d);
+  // Date future (messaggi programmati, posticipi): sempre con l'ora.
+  if (n === -1) return `Domani ${hm(d)}`;
+  if (n < -1 && n > -7) return `${cap(d.toLocaleDateString("it-IT", { weekday: "short" }).replace(".", ""))} ${hm(d)}`;
+  if (n <= -7) return `${d.toLocaleDateString("it-IT", { day: "numeric", month: "short" }).replace(".", "")} ${hm(d)}`;
+  if (n === 0) return hm(d);
   if (n === 1) return "Ieri";
   if (n < 7) return cap(d.toLocaleDateString("it-IT", { weekday: "short" }).replace(".", ""));
   return d.toLocaleDateString("it-IT", { day: "numeric", month: "short" }).replace(".", "");
@@ -24,15 +28,18 @@ export function shortTime(ts: number): string {
 export function longTime(ts: number): string {
   const d = new Date(ts * 1000);
   const n = daysAgo(ts);
-  if (n <= 0) return `Oggi, ${hm(d)}`;
+  if (n === 0) return `Oggi, ${hm(d)}`;
+  if (n === -1) return `Domani, ${hm(d)}`;
   if (n === 1) return `Ieri, ${hm(d)}`;
-  if (n < 7) return `${cap(d.toLocaleDateString("it-IT", { weekday: "long" }))}, ${hm(d)}`;
+  if (Math.abs(n) < 7) return `${cap(d.toLocaleDateString("it-IT", { weekday: "long" }))}, ${hm(d)}`;
   return `${d.toLocaleDateString("it-IT", { day: "numeric", month: "long", year: "numeric" })}, ${hm(d)}`;
 }
 
 export function groupLabel(ts: number): string {
   const n = daysAgo(ts);
-  if (n <= 0) return "Oggi";
+  if (n === -1) return "Domani";
+  if (n < -1) return "Più avanti";
+  if (n === 0) return "Oggi";
   if (n === 1) return "Ieri";
   if (n < 7) return "Questa settimana";
   if (n < 31) return "Questo mese";

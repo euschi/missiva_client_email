@@ -38,15 +38,19 @@ Dipendenze di sistema (Arch): `webkit2gtk-4.1`, `libsoup3`, `openssl` e un servi
 | Configurazione account (senza segreti) | `~/.config/missiva/accounts.json` |
 | Password e token | portachiavi di sistema, servizio `missiva` |
 | Cache dei messaggi | `~/.cache/missiva/<account>-<cartella>.json` |
+| Messaggi programmati | `~/.config/missiva/outbox.json` |
+| Posticipi ed etichette | `~/.config/missiva/snoozed.json`, `labels.json` |
 | Allegati aperti | cartella Scaricati |
 | Preferenze di aspetto | localStorage della webview |
 
 ## Limiti attuali
 
-- I messaggi si leggono come testo: l'HTML viene convertito in testo semplice e l'invio è sempre in testo semplice.
+- I messaggi si leggono come testo: l'HTML viene convertito in testo semplice. In scrittura **grassetto**, _corsivo_, link ed elenchi si scrivono in stile Markdown e partono come HTML insieme alla versione in testo semplice.
+- "Invia più tardi" spedisce dal computer: Missiva deve essere aperta, anche solo nell'area di notifica, all'ora scelta. Se è chiusa, il messaggio parte alla riapertura. Dopo 3 tentativi falliti resta in Programmati con l'errore.
+- Posticipi ed etichette sono locali: non si sincronizzano con il server né con altri computer.
 - Ogni sincronizzazione scarica al massimo gli ultimi 60 messaggi per cartella nel periodo scelto. Non c'è IMAP IDLE: la posta si aggiorna ogni 5 minuti, con F5 o con il pulsante di sincronizzazione.
 - Le bozze si leggono ma non si salvano. Gli allegati non vengono inoltrati.
 
 ## Scorciatoie
 
-`C` scrivi · `Ctrl K` cerca · `F5` sincronizza · `Ctrl ↵` invia · `Esc` chiude le finestre
+`C` scrivi · `Ctrl K` cerca · `F5` sincronizza · `J`/`K` messaggio successivo/precedente · `R`/`A`/`F` rispondi, a tutti, inoltra · `E` archivia · `B` posticipa · `L` etichetta · `Ctrl ↵` invia · `Esc` chiude le finestre (elenco completo in Impostazioni → Scorciatoie)

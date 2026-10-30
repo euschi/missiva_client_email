@@ -4,13 +4,14 @@ mod error;
 mod imap_client;
 mod mail;
 mod oauth;
+mod outbox;
 mod secrets;
 mod smtp;
 mod tray;
 
 use serde::{Deserialize, Serialize};
 use tauri::async_runtime::spawn_blocking;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_opener::OpenerExt;
 
 use accounts::{Account, Provider, Server};
@@ -255,8 +256,7 @@ async fn move_message(target: MessageRef, to: Folder) -> Result<()> {
     .await
 }
 
-#[tauri::command]
-async fn send_message(outgoing: smtp::Outgoing) -> Result<()> {
+async fn deliver(outgoing: smtp::Outgoing) -> Result<()> {
     if outgoing.to.is_empty() {
         return Err(msg("Aggiungi almeno un destinatario"));
     }
@@ -272,6 +272,132 @@ async fn send_message(outgoing: smtp::Outgoing) -> Result<()> {
         Ok(())
     })
     .await
+}
+
+#[tauri::command]
+async fn send_message(outgoing: smtp::Outgoing) -> Result<()> {
+    deliver(outgoing).await
+}
+
+#[tauri::command]
+fn schedule_message(outgoing: smtp::Outgoing, at: i64) -> Result<outbox::Scheduled> {
+    if outgoing.to.is_empty() {
+        return Err(msg("Aggiungi almeno un destinatario"));
+    }
+    accounts::get(&outgoing.account_id)?;
+    let item = outbox::Scheduled { id: uuid::Uuid::new_v4().to_string(), at, outgoing, attempts: 0, error: None };
+    let saved = item.clone();
+    outbox::update(|all| all.push(item))?;
+    Ok(saved)
+}
+
+#[tauri::command]
+fn list_scheduled() -> Result<Vec<outbox::Scheduled>> {
+    outbox::load()
+}
+
+#[tauri::command]
+fn cancel_scheduled(id: String) -> Result<()> {
+    outbox::update(|all| all.retain(|s| s.id != id))
+}
+
+/// Invia subito un messaggio programmato (anche dopo un errore) e restituisce l'esito.
+#[tauri::command]
+async fn send_scheduled_now(handle: AppHandle, id: String) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    let found = outbox::update(|all| {
+        all.iter_mut().find(|s| s.id == id).map(|s| {
+            s.at = now;
+            s.attempts = 0;
+            s.error = None;
+        })
+    })?;
+    if found.is_none() {
+        return Err(msg("Il messaggio programmato non esiste più"));
+    }
+    match flush_outbox(&handle).await.into_iter().find(|(sid, _)| *sid == id) {
+        Some((_, Some(e))) => Err(msg(e)),
+        _ => Ok(()),
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OutboxEvent {
+    id: String,
+    subject: String,
+    error: Option<String>,
+}
+
+// Il ciclo in background e "Invia ora" non devono spedire lo stesso messaggio due volte.
+static FLUSHING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Spedisce i messaggi programmati scaduti. Per ognuno restituisce l'errore finale, se c'è.
+async fn flush_outbox(handle: &AppHandle) -> Vec<(String, Option<String>)> {
+    let _g = FLUSHING.lock().await;
+    let now = chrono::Utc::now().timestamp();
+    let due: Vec<_> = match outbox::load() {
+        Ok(all) => all.into_iter().filter(|s| s.at <= now && s.error.is_none()).collect(),
+        Err(_) => return Vec::new(),
+    };
+    let mut results = Vec::new();
+    for s in due {
+        let error = deliver(s.outgoing.clone()).await.err().map(|e| e.to_string());
+        // Dopo un errore riprova tra un minuto, fino a MAX_ATTEMPTS.
+        let final_error = outbox::update(|all| {
+            let Some(pos) = all.iter().position(|x| x.id == s.id) else { return None };
+            match &error {
+                None => {
+                    all.remove(pos);
+                    None
+                }
+                Some(e) => {
+                    let x = &mut all[pos];
+                    x.attempts += 1;
+                    x.at = now + 60;
+                    (x.attempts >= outbox::MAX_ATTEMPTS).then(|| {
+                        x.error = Some(e.clone());
+                        e.clone()
+                    })
+                }
+            }
+        })
+        .ok()
+        .flatten();
+        if error.is_none() || final_error.is_some() {
+            let _ = handle.emit("outbox-changed", OutboxEvent { id: s.id.clone(), subject: s.outgoing.subject.clone(), error: final_error.clone() });
+        }
+        results.push((s.id, error));
+    }
+    results
+}
+
+/// File JSON condivisi con il frontend (posticipi ed etichette) in ~/.config/missiva/.
+const STORES: [&str; 2] = ["snoozed", "labels"];
+
+fn store_path(name: &str) -> Result<std::path::PathBuf> {
+    if !STORES.contains(&name) {
+        return Err(msg("Archivio sconosciuto"));
+    }
+    accounts::config_file(&format!("{name}.json"))
+}
+
+#[tauri::command]
+fn read_store(name: String) -> Result<serde_json::Value> {
+    let path = store_path(&name)?;
+    if !path.exists() {
+        return Ok(serde_json::Value::Null);
+    }
+    Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+}
+
+#[tauri::command]
+fn write_store(name: String, value: serde_json::Value) -> Result<()> {
+    let path = store_path(&name)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&value)?)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -331,6 +457,14 @@ pub fn run() {
             if let Err(e) = tray::setup(app) {
                 eprintln!("Area di notifica non disponibile: {e}");
             }
+            // Invio dei messaggi programmati, anche con la finestra nascosta.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    flush_outbox(&handle).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -345,6 +479,12 @@ pub fn run() {
             set_flags,
             move_message,
             send_message,
+            schedule_message,
+            list_scheduled,
+            cancel_scheduled,
+            send_scheduled_now,
+            read_store,
+            write_store,
             open_attachment,
             clear_cache,
             tray_available,

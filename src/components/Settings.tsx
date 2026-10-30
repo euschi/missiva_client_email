@@ -1,18 +1,20 @@
 import { useState } from "react";
 import { api, errorText, inTauri } from "../api";
-import { monoOf } from "../format";
+import { monoOf, plural } from "../format";
 import { Icon, type IconName } from "../icons";
 import { notificationsAllowed, notifyTest } from "../notify";
 import { SHORTCUTS } from "../shortcuts";
+import { LABEL_COLORS, type Labels } from "../store";
 import { PRESETS, accentOf, inkFor, isHex, type Density, type Prefs, type Reader } from "../prefs";
 import type { Account, AccountPatch } from "../types";
 import { CloseButton, Modal } from "./Modal";
 
-export type Section = "accounts" | "look" | "notifications" | "tray" | "shortcuts" | "privacy";
+export type Section = "accounts" | "look" | "labels" | "notifications" | "tray" | "shortcuts" | "privacy";
 
 const SECTIONS: { id: Section; label: string; icon: IconName }[] = [
   { id: "accounts", label: "Account", icon: "user" },
   { id: "look", label: "Aspetto", icon: "palette" },
+  { id: "labels", label: "Etichette", icon: "tag" },
   { id: "notifications", label: "Notifiche", icon: "bell" },
   { id: "tray", label: "Area di notifica", icon: "tray" },
   { id: "shortcuts", label: "Scorciatoie", icon: "keys" },
@@ -30,6 +32,8 @@ interface Props {
   onAccountRemoved: (id: string) => void;
   onAddAccount: () => void;
   trayAvailable: boolean;
+  labels: Labels;
+  onLabels: (l: Labels) => void;
   onClearCache: () => Promise<void>;
   onClose: () => void;
 }
@@ -54,6 +58,7 @@ export function Settings(p: Props) {
         <section className="settings-main scroll">
           {section === "accounts" && <Accounts {...p} />}
           {section === "look" && <Look prefs={p.prefs} onPrefs={p.onPrefs} />}
+          {section === "labels" && <LabelsSection labels={p.labels} onLabels={p.onLabels} />}
           {section === "notifications" && <Notifications prefs={p.prefs} onPrefs={p.onPrefs} />}
           {section === "tray" && <Tray prefs={p.prefs} onPrefs={p.onPrefs} available={p.trayAvailable} />}
           {section === "shortcuts" && <Shortcuts />}
@@ -439,6 +444,59 @@ function Privacy({ prefs, onPrefs, onClearCache }: PrefsProps & { onClearCache: 
           {clearing === "done" && <span className="setting-desc" role="status">Cache svuotata.</span>}
         </div>
       </div>
+    </>
+  );
+}
+
+function LabelsSection({ labels, onLabels }: { labels: Labels; onLabels: (l: Labels) => void }) {
+  const count = (id: string) => Object.values(labels.byMessage).filter((ids) => ids.includes(id)).length;
+  const patch = (id: string, change: { name?: string; color?: string }) =>
+    onLabels({ ...labels, defs: labels.defs.map((l) => (l.id === id ? { ...l, ...change } : l)) });
+  const remove = (id: string) =>
+    onLabels({
+      defs: labels.defs.filter((l) => l.id !== id),
+      byMessage: Object.fromEntries(
+        Object.entries(labels.byMessage)
+          .map(([k, ids]) => [k, ids.filter((x) => x !== id)] as const)
+          .filter(([, ids]) => ids.length > 0),
+      ),
+    });
+  return (
+    <>
+      <Head title="Etichette" text="Le etichette restano su questo computer e valgono per tutti gli account. Si applicano dal pannello di lettura con L." />
+      {labels.defs.length === 0 ? (
+        <p className="setting-desc">Nessuna etichetta. Apri un messaggio e usa il pulsante Etichetta per crearne una.</p>
+      ) : (
+        <div className="settings-list">
+          {labels.defs.map((l) => {
+            const next = LABEL_COLORS[(LABEL_COLORS.indexOf(l.color) + 1) % LABEL_COLORS.length];
+            return (
+              <div key={l.id} className="setting-row">
+                <button type="button" className="swatch-btn" style={{ background: l.color }} aria-label={`Cambia colore di ${l.name}`} title="Cambia colore" onClick={() => patch(l.id, { color: next })} />
+                <label className="setting-text">
+                  <span className="sr-only">Nome dell’etichetta</span>
+                  <input
+                    className="inline-input"
+                    type="text"
+                    defaultValue={l.name}
+                    maxLength={40}
+                    onBlur={(e) => {
+                      const name = e.target.value.trim();
+                      if (name && name !== l.name) patch(l.id, { name });
+                      else e.target.value = l.name;
+                    }}
+                    onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+                  />
+                </label>
+                <span className="setting-desc">{plural(count(l.id), "messaggio", "messaggi")}</span>
+                <button type="button" className="icon-btn" aria-label={`Elimina ${l.name}`} title="Elimina etichetta" onClick={() => remove(l.id)}>
+                  <Icon name="trash" size={15} stroke={1.8} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </>
   );
 }

@@ -1,6 +1,8 @@
 import { groupLabel, initials, monoOf, shortTime } from "../format";
 import { Icon } from "../icons";
+import type { Label } from "../store";
 import type { Account, Message } from "../types";
+import { LabelChips } from "./Pickers";
 
 export type Chip = "all" | "unread" | "attach";
 
@@ -19,10 +21,13 @@ interface Props {
   accounts: Record<string, Account>;
   selectedId: string | null;
   onSelect: (m: Message) => void;
+  labelsOf: (m: Message) => Label[];
+  /** Ora di riapparizione (posticipati) o di invio (programmati). */
+  wakeOf: (m: Message) => number | undefined;
   empty: { title: string; text: string; action?: { label: string; run: () => void } };
 }
 
-export function MessageList({ title, subtitle, chip, onChip, messages, accounts, selectedId, onSelect, empty }: Props) {
+export function MessageList({ title, subtitle, chip, onChip, messages, accounts, selectedId, onSelect, labelsOf, wakeOf, empty }: Props) {
   const groups: { label: string; items: Message[] }[] = [];
   for (const m of messages) {
     const label = groupLabel(m.date);
@@ -66,6 +71,7 @@ export function MessageList({ title, subtitle, chip, onChip, messages, accounts,
             <div className="group-label eyebrow">{g.label}</div>
             {g.items.map((m) => {
               const a = accounts[m.accountId];
+              const wake = wakeOf(m);
               return (
                 <button
                   key={m.id}
@@ -92,6 +98,17 @@ export function MessageList({ title, subtitle, chip, onChip, messages, accounts,
                     </span>
                     <span className="row-subject">{m.subject}</span>
                     {m.snippet && <span className="row-snippet">{m.snippet}</span>}
+                    {(wake || labelsOf(m).length > 0) && (
+                      <span className="row-extra">
+                        {wake && (
+                          <span className={m.scheduled?.error ? "wake error" : "wake"}>
+                            <Icon name={m.scheduled?.error ? "alert" : "clock"} size={12} stroke={2} />
+                            {m.scheduled?.error ? "Invio non riuscito" : shortTime(wake)}
+                          </span>
+                        )}
+                        <LabelChips labels={labelsOf(m)} small />
+                      </span>
+                    )}
                   </span>
                 </button>
               );
