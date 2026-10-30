@@ -47,6 +47,14 @@ export const api = {
   setFlags: (m: Message, flags: { seen?: boolean; flagged?: boolean }): Promise<void> =>
     inTauri ? invoke("set_flags", { target: ref(m), seen: flags.seen ?? null, flagged: flags.flagged ?? null }) : demo.setFlags(m, flags),
 
+  setFlagsMany: (ms: Message[], flags: { seen?: boolean; flagged?: boolean }): Promise<void> =>
+    inTauri
+      ? invoke("set_flags_many", { targets: ms.map(ref), seen: flags.seen ?? null, flagged: flags.flagged ?? null })
+      : Promise.all(ms.map((m) => demo.setFlags(m, flags))).then(() => {}),
+
+  moveMessages: (ms: Message[], to: Folder): Promise<void> =>
+    inTauri ? invoke("move_messages", { targets: ms.map(ref), to }) : Promise.all(ms.map((m) => demo.move(m, to))).then(() => {}),
+
   moveMessage: (m: Message, to: Folder): Promise<void> => (inTauri ? invoke("move_message", { target: ref(m), to }) : demo.move(m, to)),
 
   sendMessage: (outgoing: Outgoing): Promise<void> => (inTauri ? invoke("send_message", { outgoing }) : demo.send(outgoing)),

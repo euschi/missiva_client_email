@@ -224,21 +224,27 @@ fn fetch_in(acc: &Account, mut s: Session, folder: Folder, mailbox: &str) -> Res
     Ok(out)
 }
 
-pub fn set_flag(acc: &Account, auth: &Auth, mailbox: &str, uid: u32, flag: &str, on: bool) -> Result<()> {
+/// Insieme di UID per i comandi IMAP: "12,15,40".
+fn uid_set(uids: &[u32]) -> String {
+    uids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+}
+
+/// Imposta o toglie un flag su uno o più messaggi della stessa casella, in una sola sessione.
+pub fn set_flag(acc: &Account, auth: &Auth, mailbox: &str, uids: &[u32], flag: &str, on: bool) -> Result<()> {
     let mut s = connect(acc, auth)?;
     s.select(mailbox)?;
     let op = if on { "+FLAGS.SILENT" } else { "-FLAGS.SILENT" };
-    s.uid_store(uid.to_string(), format!("{op} ({flag})"))?;
+    s.uid_store(uid_set(uids), format!("{op} ({flag})"))?;
     let _ = s.logout();
     Ok(())
 }
 
-/// Sposta un messaggio in Archivio o Cestino.
-pub fn move_to(acc: &Account, auth: &Auth, mailbox: &str, uid: u32, target: Folder) -> Result<()> {
+/// Sposta uno o più messaggi della stessa casella in Archivio o Cestino, in una sola sessione.
+pub fn move_to(acc: &Account, auth: &Auth, mailbox: &str, uids: &[u32], target: Folder) -> Result<()> {
     let mut s = connect(acc, auth)?;
     let dest = resolve(&mut s, target)?;
     s.select(mailbox)?;
-    let uid = uid.to_string();
+    let uid = uid_set(uids);
     match dest {
         Some(dest) if dest != mailbox => {
             if s.capabilities()?.has_str("MOVE") {
