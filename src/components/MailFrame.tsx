@@ -27,30 +27,33 @@ const documentFor = (html: string, remote: boolean) =>
 interface Props {
   html: string;
   remote: boolean;
-  /** Clic su un link http(s). */
-  onLink: (url: string) => void;
-  /** Clic su un link mailto: apre la composizione verso quell'indirizzo. */
-  onMailto: (address: string) => void;
+  /** Clic su un link http(s), con il testo che mostrava. */
+  onLink: (url: string, text: string) => void;
+  /** Clic su un link mailto:, intero. */
+  onMailto: (href: string) => void;
+  /** Il puntatore è sopra un link (o non più). */
+  onHover: (href: string | null) => void;
 }
 
 /**
  * Messaggio HTML isolato. WebKitGTK non esegue i listener messi dal documento padre dentro un
  * iframe senza `allow-scripts`: clic e altezza arrivano quindi da public/mail-frame.js via postMessage.
  */
-export function MailFrame({ html, remote, onLink, onMailto }: Props) {
+export function MailFrame({ html, remote, onLink, onMailto, onHover }: Props) {
   const ref = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(160);
-  const handlers = useRef({ onLink, onMailto });
-  handlers.current = { onLink, onMailto };
+  const handlers = useRef({ onLink, onMailto, onHover });
+  handlers.current = { onLink, onMailto, onHover };
 
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
       if (e.source !== ref.current?.contentWindow || typeof e.data !== "object" || e.data === null) return;
-      const { type, height: h, href } = e.data as { type?: unknown; height?: unknown; href?: unknown };
+      const { type, height: h, href, text } = e.data as { type?: unknown; height?: unknown; href?: unknown; text?: unknown };
       if (type === "missiva-height" && typeof h === "number") setHeight(h);
+      else if (type === "missiva-hover") handlers.current.onHover(typeof href === "string" ? href : null);
       else if (type === "missiva-link" && typeof href === "string") {
-        if (/^https?:/i.test(href)) handlers.current.onLink(href);
-        else if (/^mailto:/i.test(href)) handlers.current.onMailto(mailtoAddress(href));
+        if (/^https?:/i.test(href)) handlers.current.onLink(href, typeof text === "string" ? text : "");
+        else if (/^mailto:/i.test(href)) handlers.current.onMailto(href);
       }
     };
     window.addEventListener("message", onMessage);
@@ -67,14 +70,4 @@ export function MailFrame({ html, remote, onLink, onMailto }: Props) {
       style={{ height }}
     />
   );
-}
-
-/** Indirizzo di un link mailto:, tollerando le codifiche percentuali errate. */
-function mailtoAddress(href: string) {
-  const raw = href.slice(7).split("?")[0];
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
-  }
 }

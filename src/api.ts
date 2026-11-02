@@ -1,9 +1,9 @@
 // Ponte verso i comandi Tauri. Fuori da Tauri (vite nel browser) usa i dati demo del design.
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { demo } from "./demo";
-import type { Account, AccountPatch, Browser, Folder, Guess, HtmlView, Mailbox, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
+import type { Account, AccountPatch, Browser, Folder, Invite, SearchQuery, Unsubscribe, Guess, HtmlView, Mailbox, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
 
 export const inTauri = isTauri();
 
@@ -62,11 +62,62 @@ export const api = {
   loadOlder: (m: Message): Promise<Message[]> => (inTauri ? invoke("load_older", { target: ref(m) }) : Promise.resolve([])),
 
   /** Ricerca sul server in tutti gli account. */
-  searchMail: (query: string): Promise<SyncReport> => (inTauri ? invoke("search_mail", { query }) : demo.sync("archive")),
+  searchMail: (query: SearchQuery): Promise<SyncReport> => (inTauri ? invoke("search_mail", { query }) : demo.sync("archive")),
 
   /** Copia gli allegati su disco e ne restituisce i percorsi, per un nuovo messaggio. */
   prepareAttachments: (m: Message, indexes: number[]): Promise<string[]> =>
     inTauri ? invoke("prepare_attachments", { target: ref(m), indexes }) : Promise.resolve(indexes.map((i) => m.attachments.find((f) => f.index === i)?.name ?? "allegato")),
+
+  markSpam: (ms: Message[]): Promise<void> => (inTauri ? invoke("mark_spam", { targets: ms.map(ref) }) : Promise.all(ms.map((m) => demo.move(m, "other"))).then(() => {})),
+
+  createMailbox: (account: string, parent: string | null, name: string, delimiter: string): Promise<string> =>
+    inTauri ? invoke("create_mailbox", { account, parent, name, delimiter }) : Promise.resolve(name),
+
+  renameMailbox: (account: string, path: string, name: string, delimiter: string): Promise<void> =>
+    inTauri ? invoke("rename_mailbox", { account, path, name, delimiter }) : Promise.resolve(),
+
+  deleteMailbox: (account: string, path: string): Promise<void> => (inTauri ? invoke("delete_mailbox", { account, path }) : Promise.resolve()),
+
+  saveAttachment: (m: Message, index: number, path: string): Promise<void> => (inTauri ? invoke("save_attachment", { target: ref(m), index, path }) : Promise.resolve()),
+
+  saveAttachments: (m: Message, indexes: number[], dir: string): Promise<number> =>
+    inTauri ? invoke("save_attachments", { target: ref(m), indexes, dir }) : Promise.resolve(indexes.length),
+
+  exportEml: (m: Message, path: string): Promise<void> => (inTauri ? invoke("export_eml", { target: ref(m), path }) : Promise.resolve()),
+
+  /** Percorso scelto dall'utente per salvare un file; `null` se annulla. */
+  pickSavePath: async (name: string): Promise<string | null> => (inTauri ? save({ defaultPath: name }) : name),
+
+  pickFolder: async (): Promise<string | null> => {
+    if (!inTauri) return "Scaricati";
+    const picked = await open({ directory: true, title: "Salva gli allegati in" });
+    return Array.isArray(picked) ? (picked[0] ?? null) : picked;
+  },
+
+  unsubscribeInfo: (m: Message): Promise<Unsubscribe | null> => (inTauri ? invoke("unsubscribe_info", { target: ref(m) }) : Promise.resolve(null)),
+
+  unsubscribePost: (url: string): Promise<void> => (inTauri ? invoke("unsubscribe_post", { url }) : Promise.resolve()),
+
+  calendarInvite: (m: Message): Promise<Invite | null> => (inTauri ? invoke("calendar_invite", { target: ref(m) }) : Promise.resolve(null)),
+
+  respondInvite: (m: Message, status: "accepted" | "tentative" | "declined"): Promise<void> =>
+    inTauri ? invoke("respond_invite", { target: ref(m), status }) : Promise.resolve(),
+
+  /** Il server di invio risponde? Falso se siamo offline. */
+  serverReachable: (account: string): Promise<boolean> => (inTauri ? invoke("server_reachable", { account }) : Promise.resolve(true)),
+
+  gmailSetLabel: (ms: Message[], label: string, on: boolean): Promise<void> =>
+    inTauri ? invoke("gmail_set_label", { targets: ms.map(ref), messageIds: ms.map((m) => m.messageId ?? ""), label, on }) : Promise.resolve(),
+
+  gmailLabelMembers: (account: string, label: string): Promise<{ ids: string[]; complete: boolean } | null> =>
+    inTauri ? invoke("gmail_label_members", { account, label }) : Promise.resolve(null),
+
+  /** Link mailto: con cui è stata avviata l'app. */
+  initialMailto: (): Promise<string | null> => (inTauri ? invoke("initial_mailto") : Promise.resolve(null)),
+
+  isDefaultMailClient: (): Promise<boolean> => (inTauri ? invoke("is_default_mail_client") : Promise.resolve(false)),
+
+  setDefaultMailClient: (): Promise<void> => (inTauri ? invoke("set_default_mail_client") : Promise.resolve()),
 
   saveDraft: (outgoing: Outgoing): Promise<void> => (inTauri ? invoke("save_draft", { outgoing }) : Promise.resolve()),
 

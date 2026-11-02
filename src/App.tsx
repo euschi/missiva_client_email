@@ -4,9 +4,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, errorText, inTauri } from "./api";
 import { AddAccount } from "./components/AddAccount";
 import { Compose } from "./components/Compose";
-import { Confirm } from "./components/Modal";
+import { Confirm, Prompt } from "./components/Modal";
 import { LinkChooser } from "./components/LinkChooser";
-import { MessageList, type Chip } from "./components/MessageList";
+import { MessageList, type Chip, type DropTarget, type RowMenuItem } from "./components/MessageList";
 import { nextLabelColor } from "./components/Pickers";
 import { Preview } from "./components/Preview";
 import { Reader, type ReaderMenu } from "./components/Reader";
@@ -15,19 +15,24 @@ import { Sidebar, VIEWS, type View } from "./components/Sidebar";
 import { TitleBar } from "./components/TitleBar";
 import { longTime, plural, relativeSync } from "./format";
 import { Icon } from "./icons";
+import { matchesSearch, parseMailto, parseSearch, quotedHtmlBlock, suspiciousLink } from "./mailtext";
 import { notifyNewMail } from "./notify";
 import { buildThreads } from "./threads";
 import { applyPrefs, loadPrefs, savePrefs, type Prefs } from "./prefs";
-import { keyOf, useStore, type Labels, type Snooze } from "./store";
-import type { Account, Browser, Contact, Draft, Folder, Mailbox, Message, OpenBox, Outgoing, Scheduled } from "./types";
+import { keyOf, useStore, type Labels, type Rule, type Snooze, type Template } from "./store";
+import type { Account, Attachment, Browser, Contact, Draft, Folder, Mailbox, Message, OpenBox, Outgoing, Scheduled, Unsubscribe } from "./types";
 
 type ModalState =
   | { kind: "compose"; draft: Draft }
   | { kind: "account" }
-  | { kind: "settings"; section: Section }
+  | { kind: "settings"; section: Section; ruleDraft?: Partial<Rule> }
+  | { kind: "prompt"; title: string; label: string; initial?: string; action: string; run: (value: string) => void }
   | { kind: "preview"; message: Message; index: number }
   | { kind: "link"; url: string; browsers: Browser[] }
   | { kind: "confirm"; title: string; text: string; action: string; run: () => void };
+
+/** Tutto ciò che serve per spedire e, se serve, riaprire un messaggio pronto a partire. */
+type SendMeta = { savedIn: string | null; replaces?: string };
 
 /** Posta in arrivo e cartella aperta: ogni minuto. */
 const SYNC_EVERY_MS = 60_000;
@@ -124,10 +129,10 @@ export function App() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [modal, setModal] = useState<ModalState | null>(null);
   const [prefs, setPrefsState] = useState<Prefs>(loadPrefs);
-  const [toast, setToast] = useState<{ text: string; error?: boolean; undo?: () => void } | null>(null);
+  const [toast, setToast] = useState<{ text: string; error?: boolean; undo?: () => void; ms?: number } | null>(null);
   // Messaggi già tolti dall'elenco, in attesa che scada il tempo per annullare.
   const [hidden, setHidden] = useState<string[]>([]);
-  const pending = useRef<{ ids: string[]; selected: string | null; timer: ReturnType<typeof setTimeout>; commit: () => void } | null>(null);
+  const pending = useRef<{ ids: string[]; timer: ReturnType<typeof setTimeout>; commit: () => void | Promise<void>; undo: () => void } | null>(null);
   /** Query già cercata sul server (in minuscolo) e stato della ricerca. */
   const [serverQuery, setServerQuery] = useState<{ q: string; busy: boolean } | null>(null);
   const [olderBusy, setOlderBusy] = useState(false);
@@ -142,6 +147,14 @@ export function App() {
   const [labels, setLabels] = useStore<Labels>("labels", { defs: [], byMessage: {} });
   /** Mittenti di cui mostrare sempre le immagini remote (indirizzi in minuscolo). */
   const [trusted, setTrusted] = useStore<string[]>("trusted", []);
+  const [rules, setRules] = useStore<Rule[]>("rules", []);
+  const [templates, setTemplates] = useStore<Template[]>("templates", []);
+  const labelsRef = useRef(labels);
+  labelsRef.current = labels;
+  // Funzioni definite più sotto, richiamate da chi vive fuori dal ciclo di render.
+  const runRulesRef = useRef<(added: Message[]) => Set<string>>(() => new Set());
+  const pullLabelsRef = useRef<() => void>(() => {});
+  const flushRef = useRef<() => void | Promise<void>>(() => {});
   const searchRef = useRef<HTMLInputElement>(null);
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
@@ -159,7 +172,7 @@ export function App() {
   const notify = useCallback((text: string, error = false) => setToast({ text, error }), []);
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), toast.undo ? UNDO_MS : toast.error ? 8000 : 4000);
+    const t = setTimeout(() => setToast(null), toast.ms ?? (toast.error ? 8000 : 4000));
     return () => clearTimeout(t);
   }, [toast]);
 
@@ -173,11 +186,11 @@ export function App() {
     setSyncing((n) => n + 1);
     try {
       const report = await api.syncFolder(folder, account);
+      let added: Message[] = [];
       if (folder === "inbox") {
         const known = knownIds.current;
-        const fresh = known ? report.messages.filter((m) => m.unread && !known.has(m.id)) : [];
+        added = known ? report.messages.filter((m) => !known.has(m.id)) : [];
         knownIds.current = new Set([...(known ?? []), ...report.messages.map((m) => m.id)]);
-        if (fresh.length && prefsRef.current.notify) notifyNewMail(fresh, prefsRef.current.notifyPreview);
       }
       const failed = Object.fromEntries(report.errors.map((e) => [e.accountId, e.message]));
       if (account) {
@@ -189,6 +202,12 @@ export function App() {
       } else {
         setByFolder((all) => ({ ...all, [folder]: report.messages.sort(byDateDesc) }));
         setErrors(failed);
+      }
+      if (added.length) {
+        // Le regole agiscono prima dell'avviso: ciò che hanno già sistemato non disturba.
+        const handled = runRulesRef.current(added);
+        const fresh = added.filter((m) => m.unread && !handled.has(m.id));
+        if (fresh.length && prefsRef.current.notify) notifyNewMail(fresh, prefsRef.current.notifyPreview);
       }
       setLastSync(new Date());
       return report.errors.length === 0;
@@ -242,7 +261,9 @@ export function App() {
         loadMailboxes(list);
         await loadFolder("inbox");
         // Le risposte inviate servono a completare le conversazioni.
-        loadFolder("sent");
+        loadFolder("sent").then(() => pullLabelsRef.current());
+        const url = await api.initialMailto().catch(() => null);
+        if (url) setModal((cur) => cur ?? { kind: "compose", draft: { to: [], subject: "", body: "", inReplyTo: null, ...parseMailto(url) } });
       }
     })();
   }, [loadFolder, loadMailboxes, notify]);
@@ -258,6 +279,7 @@ export function App() {
       else sync(folder);
       if (folder !== "inbox" || box) sync("inbox");
       if ((folder !== "sent" || box) && withSent) sync("sent");
+      if (withSent) pullLabelsRef.current();
     };
     const t = setInterval(() => run(++tick % SENT_EVERY_TICKS === 0), SYNC_EVERY_MS);
     // Tornando alla finestra dopo un po' la posta si aggiorna subito, senza aspettare il giro.
@@ -291,16 +313,31 @@ export function App() {
     if (!inTauri) return;
     api.trayAvailable().then(setTrayAvailable);
     const win = getCurrentWindow();
+    // Una novità ne porta spesso altre subito dietro: si raggruppano per account.
+    const timers = new Map<string, ReturnType<typeof setTimeout>>();
     const unlisten = [
       listen("tray-sync", () => sync(folderOf(viewRef.current))),
+      listen<{ accountId: string }>("mail-changed", (e) => {
+        const id = e.payload.accountId;
+        clearTimeout(timers.get(id));
+        timers.set(id, setTimeout(() => sync("inbox", id), 1500));
+      }),
+      listen<string>("open-mailto", (e) => {
+        setModal((cur) => cur ?? { kind: "compose", draft: { to: [], subject: "", body: "", inReplyTo: null, ...parseMailto(e.payload) } });
+      }),
       win.onCloseRequested(async (e) => {
+        // Chi sta aspettando il tempo per annullare parte adesso, prima che l'app si chiuda.
+        await flushRef.current();
         if (prefsRef.current.closeToTray && (await api.trayAvailable())) {
           e.preventDefault();
           await win.hide();
         }
       }),
     ];
-    return () => unlisten.forEach((p) => p.then((off) => off()));
+    return () => {
+      timers.forEach((t) => clearTimeout(t));
+      unlisten.forEach((p) => p.then((off) => off()));
+    };
   }, [sync]);
 
   const viewRef = useRef(view);
@@ -340,6 +377,7 @@ export function App() {
   const isHidden = (m: Message) => hidden.includes(m.id);
   const inbox = (byFolder.inbox ?? []).filter((m) => !snoozeOf(m) && !isHidden(m));
   const q = query.trim().toLowerCase();
+  const parsedQuery = useMemo(() => parseSearch(query), [query]);
   const searching = !!q && serverQuery?.q === q;
   const listKey = box ? boxKey(box) : folderOf(view);
   // Anche i messaggi vecchi caricati a mano, ma non nelle viste calcolate.
@@ -365,7 +403,7 @@ export function App() {
       (!labelFilter || labelsOf(m).some((l) => l.id === labelFilter)) &&
       (chip !== "unread" || m.unread) &&
       (chip !== "attach" || m.attachments.length > 0) &&
-      (!q || searching || [m.fromName, m.fromEmail, m.subject, m.body].some((s) => s.toLowerCase().includes(q))),
+      (!q || searching || matchesSearch(m, parsedQuery)),
   );
   const selected = visible.find((m) => m.id === selectedId) ?? visible[0] ?? null;
   const chosen = checked.length ? visible.filter((m) => checked.includes(m.id)) : [];
@@ -489,41 +527,60 @@ export function App() {
     if (!p) return;
     clearTimeout(p.timer);
     pending.current = null;
-    p.commit();
+    return p.commit();
   };
+  flushRef.current = flushPending;
 
   const undoPending = () => {
     const p = pending.current;
     if (!p) return;
     clearTimeout(p.timer);
     pending.current = null;
-    setHidden((list) => list.filter((id) => !p.ids.includes(id)));
-    setSelectedId(p.selected);
+    p.undo();
     setToast(null);
+  };
+
+  /** Rimanda un'azione di `ms`: fino ad allora si può annullare. Ne resta in attesa una sola. */
+  const startPending = (text: string, ms: number, ids: string[], commit: () => void | Promise<void>, undo: () => void) => {
+    flushPending();
+    pending.current = { ids, commit, undo, timer: setTimeout(flushPending, ms) };
+    setToast({ text, undo: undoPending, ms });
   };
 
   /**
    * Toglie subito i messaggi dall'elenco ma parla col server solo allo scadere del tempo per annullare.
-   * Se l'app viene chiusa prima, i messaggi restano semplicemente dov'erano.
+   * Se l'app viene chiusa prima, l'operazione parte alla chiusura.
    */
   const moveWithUndo = (ms: Message[], text: string, call: () => Promise<void>, after?: () => void) => {
-    flushPending();
     const ids = ms.map((m) => m.id);
-    const commit = () => {
-      ms.forEach((m) => dropMessage(m.id));
-      setHidden((list) => list.filter((id) => !ids.includes(id)));
-      call()
-        .then(after)
-        .catch((e) => {
-          notify(errorText(e), true);
-          ms.forEach(refresh);
-        });
-    };
     const openBefore = selected?.id ?? null;
     leaveList(ms);
     setHidden((list) => [...list, ...ids]);
-    pending.current = { ids, selected: openBefore, commit, timer: setTimeout(flushPending, UNDO_MS) };
-    setToast({ text, undo: undoPending });
+    startPending(
+      text,
+      UNDO_MS,
+      ids,
+      () => {
+        ms.forEach((m) => dropMessage(m.id));
+        setHidden((list) => list.filter((id) => !ids.includes(id)));
+        return call()
+          .then(after)
+          .catch((e) => {
+            notify(errorText(e), true);
+            ms.forEach(refresh);
+          });
+      },
+      () => {
+        setHidden((list) => list.filter((id) => !ids.includes(id)));
+        setSelectedId(openBefore);
+      },
+    );
+  };
+
+  const markSpam = (ms: Message[]) => {
+    const movable = movableFrom(ms);
+    if (!movable.length) return;
+    moveWithUndo(movable, `${plural(movable.length, "messaggio segnalato", "messaggi segnalati")} come spam`, () => api.markSpam(movable));
   };
 
   const movedText = (n: number, to: Folder) =>
@@ -617,7 +674,7 @@ export function App() {
     setChecked([]);
     setSelectedId(null);
     try {
-      const report = await api.searchMail(query.trim());
+      const report = await api.searchMail(parsedQuery);
       setByFolder((all) => ({ ...all, [SEARCH_KEY]: report.messages.sort(byDateDesc) }));
       if (report.errors.length) {
         const name = accountsById[report.errors[0].accountId]?.name ?? "Un account";
@@ -693,10 +750,19 @@ export function App() {
     setModal({ kind: "compose", draft: { to: [], subject: "", body: "", inReplyTo: null, ...draft, accountId } });
   };
 
-  const reply = (m: Message, all: boolean) => {
+  /** L'originale con la sua impaginazione; se non è disponibile resta la citazione in testo. */
+  const quotedHtmlOf = async (m: Message, intro: string) => {
+    if (!m.hasHtml || m.id.startsWith("local:")) return null;
+    const view = await api.messageHtml(m).catch(() => null);
+    return view ? quotedHtmlBlock(intro, view.html) : null;
+  };
+
+  const reply = async (m: Message, all: boolean) => {
     const own = accountsById[m.accountId]?.email.toLowerCase();
     const others = all ? [...m.to, ...m.cc].map((c) => c.email).filter((e) => e.toLowerCase() !== own && e !== m.fromEmail) : [];
-    compose({ accountId: m.accountId, to: replyTo(m), cc: others, subject: prefixed("Re:", m.subject), body: quote(m), inReplyTo: m.messageId, references: chainOf(m) });
+    const text = quote(m).trim();
+    const quoteHtml = await quotedHtmlOf(m, text.split("\n")[0]);
+    compose({ accountId: m.accountId, to: replyTo(m), cc: others, subject: prefixed("Re:", m.subject), body: "", quote: text, quoteHtml, inReplyTo: m.messageId, references: chainOf(m) });
   };
 
   /** Copia su disco gli allegati veri del messaggio; se non riesce avvisa e prosegue senza. */
@@ -712,11 +778,14 @@ export function App() {
   };
 
   const forward = async (m: Message) => {
-    const attachments = await filesOf(m);
+    const intro = `Messaggio inoltrato · Da: ${m.fromName} <${m.fromEmail}> · Data: ${longTime(m.date)} · Oggetto: ${m.subject}`;
+    const [attachments, quoteHtml] = await Promise.all([filesOf(m), quotedHtmlOf(m, intro)]);
     compose({
       accountId: m.accountId,
       subject: prefixed("I:", m.subject),
-      body: `\n\n---------- Messaggio inoltrato ----------\nDa: ${m.fromName} <${m.fromEmail}>\nData: ${longTime(m.date)}\nOggetto: ${m.subject}\n\n${m.body}`,
+      body: "",
+      quote: `---------- Messaggio inoltrato ----------\nDa: ${m.fromName} <${m.fromEmail}>\nData: ${longTime(m.date)}\nOggetto: ${m.subject}\n\n${m.body}`,
+      quoteHtml,
       attachments,
     });
   };
@@ -762,7 +831,7 @@ export function App() {
       cc: o.cc.map((email) => ({ name: email, email })),
       subject: o.subject || "(nessun oggetto)",
       snippet: o.body.replace(/\s+/g, " ").slice(0, 180),
-      body: o.body,
+      body: o.quote ? `${o.body}\n\n${o.quote}` : o.body,
       date,
       unread: false,
       flagged: false,
@@ -824,6 +893,12 @@ export function App() {
     notify("Messaggio riportato in arrivo");
   };
 
+  /** Su Gmail le etichette esistono anche sul server. */
+  const pushGmailLabel = (ms: Message[], name: string, on: boolean) => {
+    const gmail = ms.filter((m) => accountsById[m.accountId]?.provider === "google" && !m.scheduled && !m.id.startsWith("local:"));
+    if (gmail.length) api.gmailSetLabel(gmail, name, on).catch((e) => notify(`Etichetta non aggiornata su Gmail: ${errorText(e)}`, true));
+  };
+
   /** Se tutti i messaggi hanno già l'etichetta la toglie, altrimenti la aggiunge a tutti. */
   const toggleLabelMany = (ms: Message[], id: string) => {
     const everywhere = ms.every((m) => labels.byMessage[keyOf(m)]?.includes(id));
@@ -836,6 +911,8 @@ export function App() {
       else delete byMessage[k];
     }
     setLabels({ ...labels, byMessage });
+    const def = labels.defs.find((l) => l.id === id);
+    if (def) pushGmailLabel(ms, def.name, !everywhere);
   };
 
   const createLabelMany = (ms: Message[], name: string) => {
@@ -843,10 +920,320 @@ export function App() {
     const byMessage = { ...labels.byMessage };
     for (const m of ms) byMessage[keyOf(m)] = [...(byMessage[keyOf(m)] ?? []), label.id];
     setLabels({ defs: [...labels.defs, label], byMessage });
+    pushGmailLabel(ms, name, true);
+  };
+
+  /** Allinea le etichette con quelle omonime di Gmail: chi le ha cambiate altrove si vede anche qui. */
+  pullLabelsRef.current = async () => {
+    const gmail = accounts.filter((a) => a.provider === "google");
+    const defs = labelsRef.current.defs;
+    if (!gmail.length || !defs.length) return;
+    const loaded = Object.values(byFolder).flatMap((list) => list ?? []);
+    const answers = await Promise.all(
+      gmail.flatMap((a) => defs.map(async (def) => ({ a, def, members: await api.gmailLabelMembers(a.id, def.name).catch(() => null) }))),
+    );
+    const current = labelsRef.current;
+    const byMessage = { ...current.byMessage };
+    let changed = false;
+    for (const { a, def, members } of answers) {
+      if (!members) continue;
+      const ids = new Set(members.ids);
+      for (const id of ids) {
+        if (!byMessage[id]?.includes(def.id)) {
+          byMessage[id] = [...(byMessage[id] ?? []), def.id];
+          changed = true;
+        }
+      }
+      // L'etichetta tolta altrove si riconosce solo se l'elenco letto è completo.
+      if (!members.complete) continue;
+      for (const m of loaded) {
+        const k = keyOf(m);
+        if (m.accountId === a.id && m.messageId && !ids.has(k) && byMessage[k]?.includes(def.id)) {
+          const rest = byMessage[k].filter((x) => x !== def.id);
+          if (rest.length) byMessage[k] = rest;
+          else delete byMessage[k];
+          changed = true;
+        }
+      }
+    }
+    if (changed) setLabels({ ...current, byMessage });
+  };
+
+  /** Applica le regole ai messaggi appena arrivati. Restituisce quelli da non notificare. */
+  runRulesRef.current = (added) => {
+    const handled = new Set<string>();
+    if (!rules.length) return handled;
+    let current = labelsRef.current;
+    const failed = (e: unknown, m: Message) => {
+      notify(`Regola non applicata: ${errorText(e)}`, true);
+      refresh(m);
+    };
+    for (const m of added) {
+      const text = (r: Rule) => (r.field === "from" ? `${m.fromName} ${m.fromEmail}` : r.field === "to" ? [...m.to, ...m.cc].map((c) => `${c.name} ${c.email}`).join(" ") : m.subject).toLowerCase();
+      let moved = false;
+      for (const r of rules) {
+        if ((r.accountId && r.accountId !== m.accountId) || !r.contains || !text(r).includes(r.contains.toLowerCase())) continue;
+        if (r.action === "read") {
+          patchMessage(m.id, { unread: false });
+          handled.add(m.id);
+          api.setFlags(m, { seen: true }).catch((e) => failed(e, m));
+        } else if (r.action === "star") {
+          patchMessage(m.id, { flagged: true });
+          api.setFlags(m, { flagged: true }).catch((e) => failed(e, m));
+        } else if (r.action === "label" && r.labelId) {
+          const k = keyOf(m);
+          if (!current.byMessage[k]?.includes(r.labelId)) {
+            current = { ...current, byMessage: { ...current.byMessage, [k]: [...(current.byMessage[k] ?? []), r.labelId] } };
+            const def = current.defs.find((l) => l.id === r.labelId);
+            if (def) pushGmailLabel([m], def.name, true);
+          }
+        } else if (!moved && r.action !== "label") {
+          // Un messaggio si sposta una volta sola: vale la prima regola che lo sposta.
+          moved = true;
+          handled.add(m.id);
+          dropMessage(m.id);
+          const call = r.action === "spam" ? api.markSpam([m]) : r.action === "move" ? api.moveToMailbox([m], r.boxPath ?? "") : api.moveMessages([m], r.action);
+          call.catch((e) => failed(e, m));
+        }
+      }
+    }
+    if (current !== labelsRef.current) setLabels(current);
+    return handled;
+  };
+
+  // ---------- Invio con tempo per annullare ----------
+
+  const reopenDraft = (o: Outgoing, meta: SendMeta) =>
+    setModal((cur) =>
+      cur ?? {
+        kind: "compose",
+        draft: { accountId: o.accountId, to: o.to, cc: o.cc, bcc: o.bcc, subject: o.subject, body: o.body, attachments: o.attachments, inReplyTo: o.inReplyTo, references: o.references, quote: o.quote, quoteHtml: o.quoteHtml, draftId: o.messageId, replaces: meta.replaces },
+      },
+    );
+
+  const sendNow = async (a: Account, o: Outgoing, meta: SendMeta) => {
+    try {
+      await api.sendMessage(o);
+      addSent(o);
+      notify(`Messaggio inviato da ${a.name}`);
+    } catch (e) {
+      // Offline non è un errore del messaggio: va in coda e parte appena torna la rete.
+      if (await api.serverReachable(a.id).catch(() => true)) {
+        notify(`Invio non riuscito: ${errorText(e)}`, true);
+        reopenDraft(o, meta);
+        return;
+      }
+      try {
+        await api.scheduleMessage(o, nowSec());
+        notify("Nessuna connessione: il messaggio parte appena torna");
+      } catch (queued) {
+        notify(errorText(queued), true);
+        reopenDraft(o, meta);
+        return;
+      }
+    }
+    if (meta.savedIn) await api.deleteDraft(meta.savedIn, o.messageId ?? "").catch(() => {});
+    if (meta.replaces) await api.cancelScheduled(meta.replaces).catch(() => {});
+    loadScheduled();
+    sync("drafts");
+  };
+
+  const queueSend = (a: Account, o: Outgoing, meta: SendMeta) => {
+    setModal(null);
+    const delay = prefs.sendDelay;
+    if (delay <= 0) return void sendNow(a, o, meta);
+    startPending(`Invio tra ${delay} secondi da ${a.name}`, delay * 1000, [], () => sendNow(a, o, meta), () => reopenDraft(o, meta));
+  };
+
+  // ---------- Allegati ed esportazione ----------
+
+  /** Il nome di un file non può contenere separatori di percorso. */
+  const fileName = (name: string) => name.replace(/[/\\:*?"<>|]+/g, " ").trim().slice(0, 120) || "messaggio";
+
+  const saveAttachment = async (m: Message, f: Attachment) => {
+    const path = await api.pickSavePath(fileName(f.name));
+    if (!path) return;
+    api.saveAttachment(m, f.index, path).then(() => notify(`Salvato in ${path}`), (e) => notify(errorText(e), true));
+  };
+
+  const saveAll = async (m: Message, files: Attachment[]) => {
+    const dir = await api.pickFolder();
+    if (!dir) return;
+    api.saveAttachments(m, files.map((f) => f.index), dir).then((n) => notify(`${plural(n, "allegato salvato", "allegati salvati")} in ${dir}`), (e) => notify(errorText(e), true));
+  };
+
+  const exportEml = async (m: Message) => {
+    const path = await api.pickSavePath(`${fileName(m.subject)}.eml`);
+    if (!path) return;
+    api.exportEml(m, path).then(() => notify(`Esportato in ${path}`), (e) => notify(errorText(e), true));
+  };
+
+  // ---------- Disiscrizione e inviti ----------
+
+  const unsubscribe = (m: Message, info: Unsubscribe) => {
+    const close = () => setModal(null);
+    const run = () => {
+      close();
+      if (info.oneClick) {
+        api.unsubscribePost(info.oneClick).then(() => notify(`Disiscrizione richiesta a ${m.fromName}`), (e) => notify(errorText(e), true));
+      } else if (info.url) {
+        openLink(info.url);
+      } else if (info.mailto) {
+        compose({ accountId: m.accountId, ...parseMailto(info.mailto), subject: parseMailto(info.mailto).subject || "unsubscribe" });
+      }
+    };
+    setModal({
+      kind: "confirm",
+      title: `Disiscriversi da ${m.fromName}?`,
+      text: info.oneClick
+        ? "Missiva chiede al mittente di toglierti dalla lista: non serve fare altro."
+        : info.url
+          ? `Si apre la pagina di disiscrizione nel browser: ${info.url}`
+          : "Si apre un messaggio già pronto da inviare al mittente per chiedere la disiscrizione.",
+      action: "Disiscriviti",
+      run,
+    });
+  };
+
+  const respondInvite = (m: Message, status: "accepted" | "tentative" | "declined") =>
+    api.respondInvite(m, status).then(() => notify("Risposta inviata all'organizzatore"), (e) => notify(errorText(e), true));
+
+  // ---------- Cartelle ----------
+
+  const delimiterOf = (accountId: string) => mailboxes[accountId]?.find((b) => b.delimiter)?.delimiter ?? "/";
+
+  const createBox = (accountId: string, parent: Mailbox | null) =>
+    setModal({
+      kind: "prompt",
+      title: parent ? `Nuova cartella in «${parent.name}»` : "Nuova cartella",
+      label: "Nome",
+      action: "Crea",
+      run: (name) => {
+        setModal(null);
+        api
+          .createMailbox(accountId, parent?.path ?? null, name, parent?.delimiter || delimiterOf(accountId))
+          .then(() => {
+            notify(`Cartella «${name}» creata`);
+            loadMailboxes(accounts.filter((a) => a.id === accountId));
+          })
+          .catch((e) => notify(errorText(e), true));
+      },
+    });
+
+  const renameBox = (accountId: string, target: Mailbox) =>
+    setModal({
+      kind: "prompt",
+      title: `Rinomina «${target.name}»`,
+      label: "Nuovo nome",
+      initial: target.name,
+      action: "Rinomina",
+      run: (name) => {
+        setModal(null);
+        api
+          .renameMailbox(accountId, target.path, name, target.delimiter)
+          .then(() => {
+            notify(`Cartella rinominata in «${name}»`);
+            if (box?.accountId === accountId && box.mailbox.path === target.path) setBox(null);
+            loadMailboxes(accounts.filter((a) => a.id === accountId));
+          })
+          .catch((e) => notify(errorText(e), true));
+      },
+    });
+
+  const deleteBox = (accountId: string, target: Mailbox) =>
+    setModal({
+      kind: "confirm",
+      title: `Eliminare «${target.name}»?`,
+      text: "La cartella viene eliminata dal server insieme ai messaggi che contiene. Non si può annullare.",
+      action: "Elimina la cartella",
+      run: () => {
+        setModal(null);
+        api
+          .deleteMailbox(accountId, target.path)
+          .then(() => {
+            notify(`Cartella «${target.name}» eliminata`);
+            if (box?.accountId === accountId && box.mailbox.path === target.path) setBox(null);
+            loadMailboxes(accounts.filter((a) => a.id === accountId));
+          })
+          .catch((e) => notify(errorText(e), true));
+      },
+    });
+
+  // ---------- Trascinamento e menu sulle righe ----------
+
+  /** Il gruppo su cui agisce un'azione su `m`: la selezione se ne fa parte, altrimenti solo `m`. */
+  const groupOf = (m: Message) => (bulk?.some((x) => x.id === m.id) ? bulk : [m]);
+
+  const dropOn = (m: Message, target: DropTarget) => {
+    const group = groupOf(m);
+    if (target.folder) {
+      const scoped = target.accountId ? group.filter((x) => x.accountId === target.accountId) : group;
+      if (scoped.length < group.length) notify("Alcuni messaggi sono di un altro account e restano dove sono");
+      if (scoped.length) moveMany(scoped, target.folder);
+    } else if (target.path && target.accountId) {
+      const dest = mailboxes[target.accountId]?.find((b) => b.path === target.path);
+      if (!dest) return;
+      if (group.some((x) => x.accountId !== target.accountId)) return notify("Una cartella può ricevere messaggi solo dal suo account", true);
+      moveToBox(group, dest);
+    }
+  };
+
+  const rowMenu = (m: Message): RowMenuItem[] => {
+    const group = groupOf(m);
+    const many = group.length > 1;
+    const anyUnread = group.some((x) => x.unread);
+    const allFlagged = group.every((x) => x.flagged);
+    /** I menu Sposta ed Etichetta stanno nel pannello della selezione: la riga entra lì. */
+    const inPanel = (next: ReaderMenu) => () => {
+      setChecked(group.map((x) => x.id));
+      setMenu(next);
+    };
+    const items: RowMenuItem[] = [];
+    if (m.scheduled) return [{ label: "Annulla invio", icon: "trash", run: () => cancelScheduled(m.scheduled!) }];
+    if (!many) {
+      items.push(
+        { label: "Rispondi", icon: "reply", run: () => reply(m, false) },
+        { label: "Rispondi a tutti", icon: "replyAll", run: () => reply(m, true) },
+        { label: "Inoltra", icon: "forward", run: () => forward(m) },
+      );
+    }
+    items.push(
+      { label: anyUnread ? "Segna come letto" : "Segna come da leggere", icon: anyUnread ? "mail" : "markUnread", run: () => flagMany(group, { seen: anyUnread }), gap: !many },
+      { label: allFlagged ? "Togli contrassegno" : "Contrassegna", icon: "star", run: () => flagMany(group, { flagged: !allFlagged }) },
+      { label: "Etichetta…", icon: "tag", run: inPanel("label") },
+      { label: "Archivia", icon: "archive", run: () => moveMany(group, "archive"), gap: true },
+      { label: "Sposta in…", icon: "folder", run: inPanel("move") },
+      { label: "Segnala come spam", icon: "ban", run: () => markSpam(group) },
+      group.every((x) => x.folder === "trash")
+        ? { label: "Elimina definitivamente", icon: "trash", run: () => askDeleteForever(group) }
+        : { label: "Sposta nel cestino", icon: "trash", run: () => moveMany(group, "trash") },
+    );
+    if (!many) {
+      items.push(
+        { label: "Crea una regola…", icon: "filter", run: () => setModal({ kind: "settings", section: "rules", ruleDraft: { field: "from", contains: m.fromEmail, accountId: m.accountId } }), gap: true },
+        { label: "Esporta in .eml", icon: "download", run: () => exportEml(m) },
+      );
+    }
+    return items;
   };
 
   /** Apre il link nel browser predefinito; se non ci riesce chiede con cosa aprirlo. */
-  const openLink = async (url: string) => {
+  const openLink = (url: string, text = "") => {
+    const why = suspiciousLink(url, text);
+    if (!why) return void launchLink(url);
+    setModal({
+      kind: "confirm",
+      title: "Questo link sembra sospetto",
+      text: `${why} Indirizzo completo: ${url}`,
+      action: "Apri comunque",
+      run: () => {
+        setModal(null);
+        launchLink(url);
+      },
+    });
+  };
+
+  const launchLink = async (url: string) => {
     try {
       await api.openLink(url);
     } catch {
@@ -1090,6 +1477,9 @@ export function App() {
           onRenameAccount={renameAccount}
           onResyncAccount={resyncAccount}
           onReorderAccounts={reorderAccounts}
+          onCreateBox={createBox}
+          onRenameBox={renameBox}
+          onDeleteBox={deleteBox}
           labels={labels.defs}
           labelCounts={labelCounts}
           labelFilter={labelFilter}
@@ -1129,6 +1519,9 @@ export function App() {
           }
           older={canLoadOlder && !olderDone.includes(listKey) ? { busy: olderBusy, run: loadOlder } : null}
           onEmptyTrash={!box && view === "trash" ? askEmptyTrash : null}
+          rowMenu={rowMenu}
+          dragCount={(m) => groupOf(m).length}
+          onDrop={dropOn}
         />
         <Reader
           message={selected}
@@ -1160,7 +1553,15 @@ export function App() {
           onTrustSender={(email) => setTrusted([...new Set([...trusted, email.toLowerCase()])])}
           onPreview={(m, index) => setModal({ kind: "preview", message: m, index })}
           onLink={openLink}
-          onMailto={(address) => compose({ to: [address] })}
+          onMailto={(href) => compose(parseMailto(href))}
+          onSpam={(m) => markSpam([m])}
+          onBulkSpam={() => bulk && markSpam(bulk)}
+          onPrint={() => window.print()}
+          onExport={exportEml}
+          onSaveAttachment={saveAttachment}
+          onSaveAll={saveAll}
+          onUnsubscribe={unsubscribe}
+          onRespondInvite={respondInvite}
           remoteImages={prefs.remoteImages}
           menu={menu}
           onMenu={setMenu}
@@ -1182,11 +1583,10 @@ export function App() {
           accounts={accounts}
           draft={modal.draft}
           onClose={() => setModal(null)}
-          onSent={(a, outgoing) => {
-            addSent(outgoing);
-            draftDone(modal.draft);
-            notify(`Messaggio inviato da ${a.name}`);
-          }}
+          onQueued={queueSend}
+          sendDelay={prefs.sendDelay}
+          templates={templates}
+          onTemplates={setTemplates}
           onScheduled={(a, at) => {
             draftDone(modal.draft);
             notify(`Programmato: parte ${longTime(at).toLowerCase()} da ${a.name}`);
@@ -1205,9 +1605,14 @@ export function App() {
           index={modal.index}
           onIndex={(index) => setModal({ ...modal, index })}
           onOpenExternal={(index) => openAttachment(modal.message, index)}
+          onSave={(index) => {
+            const f = modal.message.attachments.find((x) => x.index === index);
+            if (f) saveAttachment(modal.message, f);
+          }}
           onClose={() => setModal(null)}
         />
       )}
+      {modal?.kind === "prompt" && <Prompt title={modal.title} label={modal.label} initial={modal.initial} action={modal.action} onSubmit={modal.run} onClose={() => setModal(null)} />}
       {modal?.kind === "confirm" && <Confirm title={modal.title} text={modal.text} action={modal.action} onConfirm={modal.run} onClose={() => setModal(null)} />}
       {modal?.kind === "link" && <LinkChooser url={modal.url} browsers={modal.browsers} onClose={() => setModal(null)} />}
       {modal?.kind === "account" && <AddAccount onClose={() => setModal(null)} onAdded={accountAdded} />}
@@ -1223,6 +1628,10 @@ export function App() {
           trayAvailable={trayAvailable}
           labels={labels}
           onLabels={setLabels}
+          rules={rules}
+          onRules={setRules}
+          ruleDraft={modal.ruleDraft}
+          mailboxes={mailboxes}
           onClearCache={async () => {
             await api.clearCache();
             setByFolder({});

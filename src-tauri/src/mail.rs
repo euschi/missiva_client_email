@@ -357,6 +357,54 @@ pub fn attachment(bytes: &[u8], index: usize) -> Result<(String, Vec<u8>)> {
     Ok((part.attachment_name().unwrap_or("allegato").to_string(), part.contents().to_vec()))
 }
 
+/// Come disiscriversi da una lista, dall'intestazione List-Unsubscribe.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Unsubscribe {
+    /// Disiscrizione immediata con una POST (RFC 8058).
+    pub one_click: Option<String>,
+    /// Pagina da aprire nel browser.
+    pub url: Option<String>,
+    /// Indirizzo a cui scrivere.
+    pub mailto: Option<String>,
+}
+
+pub fn unsubscribe_info(bytes: &[u8]) -> Option<Unsubscribe> {
+    let m = MessageParser::default().parse(bytes)?;
+    let links = m.header_raw("List-Unsubscribe")?;
+    let one_click = m.header_raw("List-Unsubscribe-Post").is_some_and(|v| v.to_ascii_lowercase().contains("one-click"));
+    let mut info = Unsubscribe::default();
+    // Forma: <https://…>, <mailto:…>. Le righe spezzate possono contenere spazi dentro le parentesi.
+    for part in links.split('<').skip(1) {
+        let Some(link) = part.split('>').next() else { continue };
+        let link: String = link.chars().filter(|c| !c.is_whitespace()).collect();
+        let lower = link.to_ascii_lowercase();
+        if lower.starts_with("https://") || lower.starts_with("http://") {
+            info.url.get_or_insert(link);
+        } else if lower.starts_with("mailto:") {
+            info.mailto.get_or_insert(link);
+        }
+    }
+    // La POST automatica solo su https, come chiede la RFC.
+    if one_click && info.url.as_ref().is_some_and(|u| u.to_ascii_lowercase().starts_with("https://")) {
+        info.one_click = info.url.clone();
+    }
+    (info.url.is_some() || info.mailto.is_some()).then_some(info)
+}
+
+/// Percorso libero in una cartella: «nome (2).pdf» se il file esiste già.
+pub fn free_path(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
+        _ => (name, String::new()),
+    };
+    (2..).map(|n| dir.join(format!("{stem} ({n}){ext}"))).find(|p| !p.exists()).expect("sequenza infinita")
+}
+
 /// Nome di file sicuro: arriva dal mittente, si tiene solo l'ultimo componente del percorso.
 pub fn safe_name(name: &str) -> String {
     Path::new(name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "allegato".into())
@@ -405,6 +453,16 @@ pub fn read_cache(account_id: &str, bucket: &str) -> Vec<Message> {
         .and_then(|p| fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+/// Le UID valgono finché la casella ha la stessa UIDVALIDITY. Vero se quanto è in cache è ancora utilizzabile.
+pub fn check_uid_validity(account_id: &str, bucket: &str, validity: Option<u32>) -> bool {
+    let Ok(path) = cache_path(account_id, &format!("{bucket}-uidvalidity")) else { return false };
+    let known = fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u32>().ok());
+    if let Some(v) = validity {
+        let _ = fs::write(&path, v.to_string());
+    }
+    known.is_some() && known == validity
 }
 
 pub fn write_cache(account_id: &str, bucket: &str, msgs: &[Message]) -> Result<()> {
@@ -542,5 +600,21 @@ In-Reply-To: <2@x>\r\nReferences: <1@x> <2@x>\r\n\r\nCiao\r\n";
         // <styled> e <header> non sono blocchi da togliere; un "<" isolato resta testo.
         let html = "<header>Titolo</header><p>a < b</p><styled>ok</styled>";
         assert_eq!(strip_hidden_html(html), html);
+    }
+
+    #[test]
+    fn disiscrizione_con_un_clic() {
+        let raw = b"From: a@b.it\r\nList-Unsubscribe: <mailto:off@b.it>,\r\n <https://b.it/off?x=1>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\nSubject: x\r\n\r\nCiao\r\n";
+        let u = unsubscribe_info(raw).unwrap();
+        assert_eq!(u.one_click.as_deref(), Some("https://b.it/off?x=1"));
+        assert_eq!(u.mailto.as_deref(), Some("mailto:off@b.it"));
+    }
+
+    #[test]
+    fn disiscrizione_senza_post_non_e_automatica() {
+        let u = unsubscribe_info(b"From: a@b.it\r\nList-Unsubscribe: <https://b.it/off>\r\n\r\nCiao\r\n").unwrap();
+        assert_eq!(u.url.as_deref(), Some("https://b.it/off"));
+        assert!(u.one_click.is_none());
+        assert!(unsubscribe_info(b"From: a@b.it\r\n\r\nCiao\r\n").is_none());
     }
 }

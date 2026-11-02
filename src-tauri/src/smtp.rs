@@ -34,6 +34,18 @@ pub struct Outgoing {
     /// Message-ID scelto da Missiva, per riconoscere subito la risposta nella conversazione.
     #[serde(default)]
     pub message_id: Option<String>,
+    /// Messaggio citato in testo semplice: va dopo la firma.
+    #[serde(default)]
+    pub quote: Option<String>,
+    /// Messaggio citato con la sua impaginazione.
+    #[serde(default)]
+    pub quote_html: Option<String>,
+    /// Firma scelta in Scrivi; senza vale quella dell'account.
+    #[serde(default)]
+    pub signature: Option<String>,
+    /// Firma già convertita in HTML, se è formattata.
+    #[serde(default)]
+    pub signature_html: Option<String>,
 }
 
 /// Gli id nelle intestazioni vanno tra parentesi angolari (RFC 5322).
@@ -54,7 +66,7 @@ pub fn build(acc: &Account, out: &Outgoing) -> Result<Message> {
     for bcc in &out.bcc {
         b = b.bcc(bcc.parse()?);
     }
-    assemble(b, acc, out, !acc.signature.trim().is_empty())
+    assemble(b, acc, out, true)
 }
 
 /// Bozza da salvare: può non avere destinatari o averne di incompleti (si tengono solo i validi).
@@ -73,7 +85,7 @@ pub fn build_draft(acc: &Account, out: &Outgoing) -> Result<Message> {
     assemble(b, acc, out, false)
 }
 
-fn assemble(b: lettre::message::MessageBuilder, acc: &Account, out: &Outgoing, signed: bool) -> Result<Message> {
+fn assemble(b: lettre::message::MessageBuilder, acc: &Account, out: &Outgoing, with_signature: bool) -> Result<Message> {
     let mut b = b.from(Mailbox::new(Some(acc.display_name.clone()), acc.email.parse()?)).subject(&out.subject);
     if let Some(id) = &out.message_id {
         b = b.message_id(Some(angle(id)));
@@ -89,10 +101,25 @@ fn assemble(b: lettre::message::MessageBuilder, acc: &Account, out: &Outgoing, s
         b = b.references(refs.join(" "));
     }
 
-    let body = if signed { format!("{}\n\n-- \n{}", out.body, acc.signature) } else { out.body.clone() };
-    let html = out.html.as_ref().map(|h| {
-        let sig = if signed { format!("<p style=\"color:#666\">-- <br>{}</p>", escape_html(&acc.signature).replace('\n', "<br>")) } else { String::new() };
-        format!("<!doctype html><html><body style=\"font-family:sans-serif;line-height:1.5\">{h}{sig}</body></html>")
+    let signature = out.signature.as_deref().unwrap_or(&acc.signature);
+    let signed = with_signature && !signature.trim().is_empty();
+    let mut body = out.body.clone();
+    if signed {
+        body = format!("{body}\n\n-- \n{signature}");
+    }
+    if let Some(quote) = &out.quote {
+        body = format!("{body}\n\n{quote}");
+    }
+    let html = (out.html.is_some() || out.quote_html.is_some()).then(|| {
+        let main = out.html.clone().unwrap_or_else(|| escape_html(&out.body).replace('\n', "<br>"));
+        let sig = if signed {
+            let content = out.signature_html.clone().unwrap_or_else(|| escape_html(signature).replace('\n', "<br>"));
+            format!("<div style=\"color:#666\">-- <br>{content}</div>")
+        } else {
+            String::new()
+        };
+        let quote = out.quote_html.as_deref().unwrap_or_default();
+        format!("<!doctype html><html><body style=\"font-family:sans-serif;line-height:1.5\">{main}{sig}{quote}</body></html>")
     });
 
     if out.attachments.is_empty() {
@@ -115,6 +142,16 @@ fn assemble(b: lettre::message::MessageBuilder, acc: &Account, out: &Outgoing, s
         parts = parts.singlepart(Attachment::new(name).body(bytes, ctype));
     }
     Ok(b.multipart(parts)?)
+}
+
+/// Risposta a un invito: testo leggibile più la parte iCalendar che il calendario del mittente capisce.
+pub fn build_invite_reply(acc: &Account, to: &str, subject: &str, ics: &str) -> Result<Message> {
+    let calendar = ContentType::parse("text/calendar; method=REPLY; charset=utf-8").expect("content type valido");
+    Ok(Message::builder()
+        .from(Mailbox::new(Some(acc.display_name.clone()), acc.email.parse()?))
+        .to(to.parse()?)
+        .subject(subject)
+        .multipart(MultiPart::alternative().singlepart(SinglePart::plain(subject.to_string())).singlepart(SinglePart::builder().header(calendar).body(ics.to_string())))?)
 }
 
 pub fn send(acc: &Account, auth: &Auth, message: &Message) -> Result<()> {
@@ -156,6 +193,7 @@ mod tests {
             username: "io".into(),
             sync_days: 30,
             signature: "La mia firma".into(),
+            signatures: vec![],
         }
     }
 
@@ -172,6 +210,10 @@ mod tests {
             in_reply_to: None,
             references: vec![],
             message_id: Some("id@esempio.it".into()),
+            quote: None,
+            quote_html: None,
+            signature: None,
+            signature_html: None,
         }
     }
 
@@ -188,6 +230,26 @@ mod tests {
         let raw = String::from_utf8(build_draft(&account(), &outgoing(&["mar", "a@b.it"])).unwrap().formatted()).unwrap();
         assert!(raw.contains("To: a@b.it"));
         assert!(!raw.contains("mar,"));
+    }
+
+    #[test]
+    fn firma_prima_della_citazione() {
+        let mut o = outgoing(&["a@b.it"]);
+        o.quote = Some("> originale".into());
+        let raw = String::from_utf8(build(&account(), &o).unwrap().formatted()).unwrap();
+        assert!(raw.find("La mia firma").unwrap() < raw.find("originale").unwrap());
+    }
+
+    #[test]
+    fn firma_scelta_e_citazione_html() {
+        let mut o = outgoing(&["a@b.it"]);
+        o.signature = Some("Firma due".into());
+        o.signature_html = Some("<b>Firma due</b>".into());
+        o.quote_html = Some("<blockquote>vecchio</blockquote>".into());
+        // L'HTML esce in quoted-printable: si ricompongono le righe spezzate.
+        let raw = String::from_utf8(build(&account(), &o).unwrap().formatted()).unwrap().replace("=\r\n", "");
+        assert!(raw.contains("Firma due") && !raw.contains("La mia firma"));
+        assert!(raw.contains("text/html") && raw.contains("vecchio"));
     }
 
     #[test]

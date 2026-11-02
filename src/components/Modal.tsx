@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Icon } from "../icons";
 
 interface Props {
@@ -67,6 +67,48 @@ export function Confirm({ title, text, action, onConfirm, onClose }: ConfirmProp
           </button>
         </div>
       </div>
+    </Modal>
+  );
+}
+
+interface PromptProps {
+  title: string;
+  label: string;
+  initial?: string;
+  action: string;
+  onSubmit: (value: string) => void;
+  onClose: () => void;
+}
+
+/** Richiesta di un breve testo, come il nome di una cartella. */
+export function Prompt({ title, label, initial = "", action, onSubmit, onClose }: PromptProps) {
+  const [value, setValue] = useState(initial);
+  return (
+    <Modal label={title} onClose={onClose} small>
+      <header className="window-head">
+        <span className="window-title">{title}</span>
+        <CloseButton onClose={onClose} />
+      </header>
+      <form
+        className="confirm-body"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (value.trim()) onSubmit(value.trim());
+        }}
+      >
+        <label className="field">
+          <span>{label}</span>
+          <input className="input" autoFocus value={value} maxLength={80} onFocus={(e) => e.target.select()} onChange={(e) => setValue(e.target.value)} />
+        </label>
+        <div className="confirm-actions">
+          <button type="button" className="btn btn-soft btn-sm" onClick={onClose}>
+            Annulla
+          </button>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={!value.trim()}>
+            {action}
+          </button>
+        </div>
+      </form>
     </Modal>
   );
 }

@@ -30,6 +30,14 @@ pub struct Server {
     pub security: Security,
 }
 
+/// Firma alternativa, scelta nella finestra Scrivi.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Signature {
+    pub id: String,
+    pub name: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -47,6 +55,8 @@ pub struct Account {
     pub sync_days: u32,
     #[serde(default)]
     pub signature: String,
+    #[serde(default)]
+    pub signatures: Vec<Signature>,
 }
 
 /// Colori assegnati in ordine ai nuovi account, come nel design.

@@ -63,13 +63,20 @@ Account nella barra laterale: con il pulsante ⋯ o il tasto destro si rinomina 
 
 ## Limiti attuali
 
+- Invio: dopo Invia ci sono 6 secondi per annullare (in Impostazioni → Invio e posta); senza connessione il messaggio resta in coda e parte quando torna. Lì si imposta anche Missiva come client predefinito per i link `mailto:`.
+- Sui messaggi: tasto destro per tutte le azioni, trascinamento sulle cartelle della barra laterale, «Disiscriviti» sulle liste di invio, inviti di calendario con Accetta/Forse/Rifiuta, avviso sui link sospetti, stampa e PDF, esportazione `.eml`, salvataggio degli allegati.
+- Ricerca: `da:` `a:` `oggetto:` `dopo:` `prima:` `ha:allegati` `stato:nonletti` `stato:contrassegnati`.
+- Barra laterale: tasto destro su una cartella per crearne, rinominarne ed eliminarne.
+- Finestra Scrivi: modelli, più firme per account, file trascinati, risposte e inoltri con l'impaginazione dell'originale.
 - Finestra Scrivi: la bozza si salva da sola nella cartella Bozze del server 15 secondi dopo l'ultima modifica e alla chiusura; si riapre con «Riprendi» e sparisce quando il messaggio parte. I destinatari vengono suggeriti dalla posta già scaricata e l'inoltro porta con sé gli allegati.
 - Archiviare, cestinare e spostare si possono annullare per 6 secondi (pulsante nell'avviso o `Ctrl Z`): il server riceve l'operazione solo dopo. Nel Cestino l'eliminazione è definitiva e chiede conferma, come «Svuota».
 - Passando il mouse su una riga compaiono le azioni rapide (letto/da leggere, archivia, cestino) e la casella per selezionarla. Con «Tutti» si seleziona l'intero elenco; il pannello di destra offre archivia, cestino, letto, contrassegno, sposta in una cartella ed etichetta su tutti i selezionati.
 - I messaggi HTML si vedono come li ha impaginati il mittente, in un riquadro isolato dove non gira nessuno script del mittente; i link si aprono nel browser predefinito (se non ci riesce, Missiva chiede con quale browser aprirli); le immagini remote restano bloccate finché non premi «Mostra» (o attivi «Carica le immagini remote» in Privacy). Cliccando un allegato si apre l'anteprima di immagini, PDF e testo; gli altri formati si aprono con l'app predefinita. In scrittura **grassetto**, _corsivo_, link ed elenchi si scrivono in stile Markdown e partono come HTML insieme alla versione in testo semplice.
 - "Invia più tardi" spedisce dal computer: Missiva deve essere aperta, anche solo nell'area di notifica, all'ora scelta. Se è chiusa, il messaggio parte alla riapertura. Dopo 3 tentativi falliti resta in Programmati con l'errore.
-- Posticipi ed etichette sono locali: non si sincronizzano con il server né con altri computer.
-- Ogni sincronizzazione scarica al massimo gli ultimi 60 messaggi per cartella nel periodo scelto; i più vecchi si raggiungono con «Carica messaggi più vecchi» in fondo all'elenco o con la ricerca sul server (Invio nel campo di ricerca, massimo 30 risultati per cartella e 100 per account, Cestino, Bozze e Spam esclusi). Non c'è IMAP IDLE: la posta in arrivo e la cartella aperta si aggiornano ogni minuto, quando torni sulla finestra, con F5 o con il pulsante di sincronizzazione; Inviati ogni 5 minuti (serve alle conversazioni).
+- I posticipi e le etichette degli account non Gmail sono locali. Su Gmail le etichette si sincronizzano con quelle omonime sul server; le etichette create solo su Gmail restano visibili come cartelle.
+- Le regole agiscono sui nuovi messaggi in arrivo mentre Missiva è aperta.
+- Gli orari degli inviti con fuso nominato si leggono come ora locale.
+- Ogni sincronizzazione scarica al massimo gli ultimi 60 messaggi per cartella nel periodo scelto; i più vecchi si raggiungono con «Carica messaggi più vecchi» in fondo all'elenco o con la ricerca sul server (Invio nel campo di ricerca, massimo 30 risultati per cartella e 100 per account, Cestino, Bozze e Spam esclusi). La posta in arrivo arriva subito con IMAP IDLE, dove il server lo supporta; in più la posta in arrivo e la cartella aperta si controllano ogni minuto, quando torni sulla finestra, con F5 o con il pulsante di sincronizzazione; Inviati ogni 5 minuti. Ogni giro scarica per intero solo i messaggi nuovi.
 - Una bozza salvata perde i destinatari in Ccn e gli indirizzi scritti a metà.
 
 ## Scorciatoie
