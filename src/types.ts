@@ -6,6 +6,12 @@ export type Security = "tls" | "starttls";
 export type Folder = "inbox" | "drafts" | "sent" | "archive" | "trash" | "other";
 
 /** Cartella creata dall'utente sul server. */
+/** Persona suggerita nei campi destinatario. */
+export interface Contact {
+  name: string;
+  email: string;
+}
+
 /** Browser installato, dalla sua voce .desktop. */
 export interface Browser {
   id: string;
@@ -160,6 +166,8 @@ export interface Draft {
   attachments?: string[];
   inReplyTo: string | null;
   references?: string[];
+  /** Message-ID della bozza salvata sul server che si sta riprendendo. */
+  draftId?: string | null;
   /** Id del messaggio programmato che questa bozza sostituisce. */
   replaces?: string;
 }

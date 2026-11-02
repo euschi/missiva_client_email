@@ -557,6 +557,7 @@ button.tree-toggle:hover { color: var(--text); background: var(--fill); }
   overflow: hidden;
 }
 .window.short { height: min(680px, 100%); }
+.window.small { height: auto; max-height: min(560px, 100%); width: min(480px, 100%); }
 .window-head { flex: 0 0 auto; height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px 0 20px; border-bottom: 1px solid var(--line); }
 .window-head-title { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
 .window-title { font-weight: 650; font-size: 17px; letter-spacing: -0.01em; color: var(--text-strong); }
@@ -944,3 +945,18 @@ textarea.input { height: auto; padding: 10px 12px; line-height: 1.5; resize: ver
 .link-url { padding: 10px 12px; border-radius: 10px; background: var(--fill); color: var(--text); font-family: var(--font-mono); font-size: 12.5px; overflow-wrap: anywhere; }
 .link-browsers { display: flex; flex-direction: column; gap: 2px; }
 .link-error { color: var(--danger); }
+
+/* ---------- Conferme, annulla, ricerca sul server, suggerimenti ---------- */
+
+.confirm-body { padding: 20px; display: flex; flex-direction: column; gap: 18px; font-size: 14px; line-height: 1.55; color: var(--text-3); }
+.confirm-body p { margin: 0; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.toast-undo { flex: 0 0 auto; color: var(--accent); font-weight: 600; }
+.list-more { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 38px; margin: 6px 12px 10px; padding: 0 12px; border: 0; border-radius: 10px; background: var(--fill); color: var(--text-3); font-size: 13px; }
+.list-more:hover:not(:disabled) { background: var(--fill-strong); color: var(--text); }
+.list-more:disabled { cursor: default; color: var(--text-5); }
+.list-more.top { margin-top: 0; }
+.recipients { position: relative; }
+.popover.suggestions { width: min(460px, 100%); max-width: 460px; }
+.pop-item[aria-selected="true"] { background: var(--fill); }
+.suggestion-name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

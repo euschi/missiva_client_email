@@ -1,7 +1,8 @@
 //! Modello dei messaggi, parsing MIME e cache locale in ~/.cache/missiva/.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -354,6 +355,37 @@ pub fn attachment(bytes: &[u8], index: usize) -> Result<(String, Vec<u8>)> {
     let m = MessageParser::default().parse(bytes).ok_or_else(|| msg("Messaggio illeggibile"))?;
     let part = m.attachments().nth(index).ok_or_else(|| msg("Allegato non trovato"))?;
     Ok((part.attachment_name().unwrap_or("allegato").to_string(), part.contents().to_vec()))
+}
+
+/// Nome di file sicuro: arriva dal mittente, si tiene solo l'ultimo componente del percorso.
+pub fn safe_name(name: &str) -> String {
+    Path::new(name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "allegato".into())
+}
+
+/// Oltre questa età i file preparati per un inoltro si eliminano.
+const ATTACHMENT_FILES_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 3600);
+
+/// Copia su disco gli allegati indicati, per inoltrarli o riprendere una bozza: restituisce i percorsi.
+pub fn attachment_files(bytes: &[u8], indexes: &[usize]) -> Result<Vec<String>> {
+    let root = cache_dir()?.join("attachments");
+    for entry in fs::read_dir(&root).into_iter().flatten().flatten() {
+        let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > ATTACHMENT_FILES_MAX_AGE);
+        if old {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+    // Una cartella per file: due allegati possono avere lo stesso nome.
+    indexes
+        .iter()
+        .map(|&index| {
+            let (name, contents) = attachment(bytes, index)?;
+            let dir = root.join(uuid::Uuid::new_v4().to_string());
+            fs::create_dir_all(&dir)?;
+            let path = dir.join(safe_name(&name));
+            fs::write(&path, contents)?;
+            Ok(path.to_string_lossy().into_owned())
+        })
+        .collect()
 }
 
 fn cache_dir() -> Result<PathBuf> {

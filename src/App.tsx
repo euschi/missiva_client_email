@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, errorText, inTauri } from "./api";
 import { AddAccount } from "./components/AddAccount";
 import { Compose } from "./components/Compose";
+import { Confirm } from "./components/Modal";
 import { LinkChooser } from "./components/LinkChooser";
 import { MessageList, type Chip } from "./components/MessageList";
 import { nextLabelColor } from "./components/Pickers";
@@ -18,17 +19,20 @@ import { notifyNewMail } from "./notify";
 import { buildThreads } from "./threads";
 import { applyPrefs, loadPrefs, savePrefs, type Prefs } from "./prefs";
 import { keyOf, useStore, type Labels, type Snooze } from "./store";
-import type { Account, Browser, Draft, Folder, Mailbox, Message, OpenBox, Outgoing, Scheduled } from "./types";
+import type { Account, Browser, Contact, Draft, Folder, Mailbox, Message, OpenBox, Outgoing, Scheduled } from "./types";
 
 type ModalState =
   | { kind: "compose"; draft: Draft }
   | { kind: "account" }
   | { kind: "settings"; section: Section }
   | { kind: "preview"; message: Message; index: number }
-  | { kind: "link"; url: string; browsers: Browser[] };
+  | { kind: "link"; url: string; browsers: Browser[] }
+  | { kind: "confirm"; title: string; text: string; action: string; run: () => void };
 
 /** Posta in arrivo e cartella aperta: ogni minuto. */
 const SYNC_EVERY_MS = 60_000;
+/** Tempo per annullare uno spostamento, prima che arrivi al server. */
+const UNDO_MS = 6_000;
 /** Inviati (per le conversazioni) si aggiorna un giro sì e quattro no. */
 const SENT_EVERY_TICKS = 5;
 
@@ -72,8 +76,33 @@ const byDateDesc = (a: Message, b: Message) => b.date - a.date;
 /** Chiave in `byFolder` dei messaggi di una cartella dell'utente. */
 const boxKey = (b: OpenBox) => `box:${b.accountId}:${b.mailbox.path}`;
 const isBoxKey = (key: string) => key.startsWith("box:");
+/** Risultati dell'ultima ricerca sul server: stanno in `byFolder` per seguire letture e spostamenti. */
+const SEARCH_KEY = "box:search";
+/** Messaggi vecchi caricati a mano per una cartella: la sincronizzazione non li tocca. */
+const olderKey = (listKey: string) => `box:older:${listKey}`;
+const uniqueById = (list: Message[]) => [...new Map(list.map((m) => [m.id, m])).values()];
 const prefixed = (prefix: string, s: string) => (s.toLowerCase().startsWith(prefix.toLowerCase()) ? s : `${prefix} ${s}`);
 const quote = (m: Message) => `\n\nIl ${longTime(m.date)}, ${m.fromName} <${m.fromEmail}> ha scritto:\n` + m.body.split("\n").map((l) => `> ${l}`).join("\n");
+
+/** Rubrica ricavata dalla posta scaricata: prima chi ho scritto io, poi per numero di messaggi. */
+function contactsFrom(byFolder: Record<string, Message[] | undefined>, accounts: Account[]): Contact[] {
+  const own = new Set(accounts.map((a) => a.email.toLowerCase()));
+  const found = new Map<string, Contact & { score: number }>();
+  const add = (name: string, email: string, weight: number) => {
+    const key = email.toLowerCase();
+    if (!key.includes("@") || own.has(key) || /^(no-?reply|do-?not-?reply|mailer-daemon|notifications?)@/.test(key)) return;
+    const known = found.get(key);
+    const label = name && name !== email ? name : known?.name || email;
+    found.set(key, { name: label, email, score: (known?.score ?? 0) + weight });
+  };
+  for (const list of Object.values(byFolder)) {
+    for (const m of list ?? []) {
+      if (m.folder === "sent") [...m.to, ...m.cc].forEach((c) => add(c.name, c.email, 5));
+      else if (m.folder !== "trash" && m.fromEmail) add(m.fromName, m.fromEmail, 1);
+    }
+  }
+  return [...found.values()].sort((a, b) => b.score - a.score);
+}
 
 export function App() {
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -95,7 +124,15 @@ export function App() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [modal, setModal] = useState<ModalState | null>(null);
   const [prefs, setPrefsState] = useState<Prefs>(loadPrefs);
-  const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null);
+  const [toast, setToast] = useState<{ text: string; error?: boolean; undo?: () => void } | null>(null);
+  // Messaggi già tolti dall'elenco, in attesa che scada il tempo per annullare.
+  const [hidden, setHidden] = useState<string[]>([]);
+  const pending = useRef<{ ids: string[]; selected: string | null; timer: ReturnType<typeof setTimeout>; commit: () => void } | null>(null);
+  /** Query già cercata sul server (in minuscolo) e stato della ricerca. */
+  const [serverQuery, setServerQuery] = useState<{ q: string; busy: boolean } | null>(null);
+  const [olderBusy, setOlderBusy] = useState(false);
+  /** Elenchi arrivati in fondo: non c'è altro da caricare. */
+  const [olderDone, setOlderDone] = useState<string[]>([]);
   const [, setTick] = useState(0);
   const [trayAvailable, setTrayAvailable] = useState(false);
   const [labelFilter, setLabelFilter] = useState<string | null>(null);
@@ -122,7 +159,7 @@ export function App() {
   const notify = useCallback((text: string, error = false) => setToast({ text, error }), []);
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), toast.error ? 8000 : 4000);
+    const t = setTimeout(() => setToast(null), toast.undo ? UNDO_MS : toast.error ? 8000 : 4000);
     return () => clearTimeout(t);
   }, [toast]);
 
@@ -300,26 +337,35 @@ export function App() {
   const labelsOf = (m: Message) => (labels.byMessage[keyOf(m)] ?? []).map((id) => labels.defs.find((l) => l.id === id)).filter((l) => l !== undefined);
 
   // Elenco visibile: cartella, account, filtro rapido, etichetta e ricerca.
-  const inbox = (byFolder.inbox ?? []).filter((m) => !snoozeOf(m));
+  const isHidden = (m: Message) => hidden.includes(m.id);
+  const inbox = (byFolder.inbox ?? []).filter((m) => !snoozeOf(m) && !isHidden(m));
   const q = query.trim().toLowerCase();
-  const source = box
-    ? (byFolder[boxKey(box)] ?? [])
+  const searching = !!q && serverQuery?.q === q;
+  const listKey = box ? boxKey(box) : folderOf(view);
+  // Anche i messaggi vecchi caricati a mano, ma non nelle viste calcolate.
+  const canLoadOlder = !q && (!!box || !["flagged", "snoozed", "scheduled"].includes(view));
+  const older = canLoadOlder ? (byFolder[olderKey(listKey)] ?? []) : [];
+  const source = searching
+    ? (byFolder[SEARCH_KEY] ?? [])
+    : box
+    ? uniqueById([...(byFolder[boxKey(box)] ?? []), ...older])
     : view === "scheduled"
       ? scheduled.map(scheduledMessage).sort((a, b) => a.date - b.date)
       : view === "snoozed"
         ? (byFolder.inbox ?? []).filter((m) => snoozeOf(m)).sort((a, b) => snoozeOf(a)! - snoozeOf(b)!)
         : view === "inbox"
-          ? inbox
-          : (byFolder[folderOf(view)] ?? []);
+          ? uniqueById([...inbox, ...older.filter((m) => !snoozeOf(m))])
+          : uniqueById([...(byFolder[folderOf(view)] ?? []), ...older]);
   const visible = source.filter(
     (m) =>
       accountsById[m.accountId] &&
+      !isHidden(m) &&
       (box || accountFilter === "all" || m.accountId === accountFilter) &&
-      (box || view !== "flagged" || m.flagged) &&
+      (box || searching || view !== "flagged" || m.flagged) &&
       (!labelFilter || labelsOf(m).some((l) => l.id === labelFilter)) &&
       (chip !== "unread" || m.unread) &&
       (chip !== "attach" || m.attachments.length > 0) &&
-      (!q || [m.fromName, m.fromEmail, m.subject, m.body].some((s) => s.toLowerCase().includes(q))),
+      (!q || searching || [m.fromName, m.fromEmail, m.subject, m.body].some((s) => s.toLowerCase().includes(q))),
   );
   const selected = visible.find((m) => m.id === selectedId) ?? visible[0] ?? null;
   const chosen = checked.length ? visible.filter((m) => checked.includes(m.id)) : [];
@@ -328,6 +374,9 @@ export function App() {
   const bulkBoxes = (bulkAccount && mailboxes[bulkAccount]?.filter((b) => b.selectable && !b.special)) || [];
   // Conversazioni su tutte le cartelle caricate (Inviati compresa).
   const threads = useMemo(() => buildThreads(Object.values(byFolder).flatMap((list) => list ?? [])), [byFolder]);
+  const composing = modal?.kind === "compose";
+  // Suggerimenti dei destinatari: chi ho già scritto prima, poi chi mi ha scritto.
+  const contacts = useMemo(() => (composing ? contactsFrom(byFolder, accounts) : []), [composing, byFolder, accounts]);
 
   const unreadByAccount = Object.fromEntries(accounts.map((a) => [a.id, inbox.filter((m) => m.unread && m.accountId === a.id).length]));
   // Contatori della radice «Tutti gli account»: sempre su tutti gli account.
@@ -425,13 +474,56 @@ export function App() {
   /** Dopo un errore riallinea la cartella del messaggio con il server. */
   const refresh = (m: Message) => (m.folder === "other" ? box && syncBox(box) : sync(m.folder));
 
-  /** Svuota la selezione; se il messaggio aperto è tra quelli che se ne vanno, apre il primo rimasto. */
+  /** Toglie i messaggi dalla selezione; se tra loro c'è quello aperto, apre il primo rimasto. */
   const leaveList = (ms: Message[]) => {
     const ids = new Set(ms.map((m) => m.id));
     const last = Math.max(...ms.map((m) => visible.indexOf(m)));
     const next = visible.slice(last + 1).find((m) => !ids.has(m.id)) ?? [...visible].reverse().find((m) => !ids.has(m.id));
-    setChecked([]);
+    setChecked((list) => list.filter((id) => !ids.has(id)));
     if (!selected || ids.has(selected.id)) setSelectedId(next?.id ?? null);
+  };
+
+  /** Rende definitivo subito lo spostamento in attesa, se c'è. */
+  const flushPending = () => {
+    const p = pending.current;
+    if (!p) return;
+    clearTimeout(p.timer);
+    pending.current = null;
+    p.commit();
+  };
+
+  const undoPending = () => {
+    const p = pending.current;
+    if (!p) return;
+    clearTimeout(p.timer);
+    pending.current = null;
+    setHidden((list) => list.filter((id) => !p.ids.includes(id)));
+    setSelectedId(p.selected);
+    setToast(null);
+  };
+
+  /**
+   * Toglie subito i messaggi dall'elenco ma parla col server solo allo scadere del tempo per annullare.
+   * Se l'app viene chiusa prima, i messaggi restano semplicemente dov'erano.
+   */
+  const moveWithUndo = (ms: Message[], text: string, call: () => Promise<void>, after?: () => void) => {
+    flushPending();
+    const ids = ms.map((m) => m.id);
+    const commit = () => {
+      ms.forEach((m) => dropMessage(m.id));
+      setHidden((list) => list.filter((id) => !ids.includes(id)));
+      call()
+        .then(after)
+        .catch((e) => {
+          notify(errorText(e), true);
+          ms.forEach(refresh);
+        });
+    };
+    const openBefore = selected?.id ?? null;
+    leaveList(ms);
+    setHidden((list) => [...list, ...ids]);
+    pending.current = { ids, selected: openBefore, commit, timer: setTimeout(flushPending, UNDO_MS) };
+    setToast({ text, undo: undoPending });
   };
 
   const movedText = (n: number, to: Folder) =>
@@ -439,42 +531,127 @@ export function App() {
       ? plural(n, "messaggio archiviato", "messaggi archiviati")
       : `${plural(n, "messaggio spostato", "messaggi spostati")} ${to === "inbox" ? "in Posta in arrivo" : "nel cestino"}`;
 
+  const movableFrom = (ms: Message[]) => ms.filter((m) => !m.scheduled && !m.id.startsWith("local:"));
+
   const moveMany = (ms: Message[], to: Folder) => {
     if (to === "trash") ms.filter((m) => m.scheduled).forEach((m) => cancelScheduled(m.scheduled!));
-    const movable = ms.filter((m) => !m.scheduled && !m.id.startsWith("local:") && m.folder !== to);
-    leaveList(ms);
+    const movable = movableFrom(ms).filter((m) => m.folder !== to);
     if (!movable.length) return;
-    movable.forEach((m) => dropMessage(m.id));
-    api
-      .moveMessages(movable, to)
-      .then(() => {
-        notify(movedText(movable.length, to));
-        // Riporta i messaggi nell'elenco di arrivo senza aspettare il prossimo giro.
-        if (to === "inbox") sync("inbox");
-      })
-      .catch((e) => {
-        notify(errorText(e), true);
-        movable.forEach(refresh);
-      });
+    moveWithUndo(
+      movable,
+      movedText(movable.length, to),
+      () => api.moveMessages(movable, to),
+      // Riporta i messaggi nell'elenco di arrivo senza aspettare il prossimo giro.
+      () => void (to === "inbox" && sync("inbox")),
+    );
   };
 
   /** Sposta in una cartella dell'utente: i messaggi sono tutti dello stesso account. */
   const moveToBox = (ms: Message[], target: Mailbox) => {
-    const movable = ms.filter((m) => !m.scheduled && !m.id.startsWith("local:") && m.mailbox !== target.path);
-    leaveList(ms);
+    const movable = movableFrom(ms).filter((m) => m.mailbox !== target.path);
     if (!movable.length) return;
-    movable.forEach((m) => dropMessage(m.id));
-    api
-      .moveToMailbox(movable, target.path)
-      .then(() => {
-        notify(`${plural(movable.length, "messaggio spostato", "messaggi spostati")} in «${target.label}»`);
-        const open = { accountId: movable[0].accountId, mailbox: target };
-        if (byFolder[boxKey(open)]) syncBox(open, true);
-      })
-      .catch((e) => {
-        notify(errorText(e), true);
-        movable.forEach(refresh);
-      });
+    const dest = { accountId: movable[0].accountId, mailbox: target };
+    moveWithUndo(
+      movable,
+      `${plural(movable.length, "messaggio spostato", "messaggi spostati")} in «${target.label}»`,
+      () => api.moveToMailbox(movable, target.path),
+      () => void (byFolder[boxKey(dest)] && syncBox(dest, true)),
+    );
+  };
+
+  /** Dal Cestino non si torna indietro: prima chiede conferma. */
+  const askDeleteForever = (ms: Message[]) => {
+    const targets = movableFrom(ms).filter((m) => m.folder === "trash");
+    if (!targets.length) return;
+    setModal({
+      kind: "confirm",
+      title: targets.length === 1 ? "Eliminare il messaggio?" : `Eliminare ${targets.length} messaggi?`,
+      text: "Vengono cancellati definitivamente dal server e non si possono recuperare.",
+      action: "Elimina definitivamente",
+      run: () => {
+        setModal(null);
+        leaveList(targets);
+        targets.forEach((m) => dropMessage(m.id));
+        api
+          .deleteForever(targets)
+          .then(() => notify(`${plural(targets.length, "messaggio eliminato", "messaggi eliminati")} definitivamente`))
+          .catch((e) => {
+            notify(errorText(e), true);
+            targets.forEach(refresh);
+          });
+      },
+    });
+  };
+
+  const askEmptyTrash = () => {
+    const account = accountFilter === "all" ? null : accountFilter;
+    setModal({
+      kind: "confirm",
+      title: "Svuotare il cestino?",
+      text: `Tutti i messaggi nel Cestino di ${account ? accountsById[account]?.name : "tutti gli account"}, anche quelli non scaricati, vengono cancellati definitivamente dal server.`,
+      action: "Svuota il cestino",
+      run: () => {
+        setModal(null);
+        setSelectedId(null);
+        setChecked([]);
+        api
+          .emptyTrash(account)
+          .then(() => notify("Cestino svuotato"))
+          .catch((e) => notify(errorText(e), true))
+          .finally(() => {
+            setByFolder((all) => ({ ...all, [olderKey("trash")]: [] }));
+            sync("trash");
+          });
+      },
+    });
+  };
+
+  /** Nel Cestino elimina per sempre, altrove sposta nel Cestino. */
+  const trash = (m: Message) => (m.folder === "trash" ? askDeleteForever([m]) : moveMany([m], "trash"));
+
+  const searchOnServer = async () => {
+    if (!q || serverQuery?.busy) return;
+    const asked = q;
+    setServerQuery({ q: asked, busy: true });
+    setByFolder((all) => ({ ...all, [SEARCH_KEY]: [] }));
+    setChecked([]);
+    setSelectedId(null);
+    try {
+      const report = await api.searchMail(query.trim());
+      setByFolder((all) => ({ ...all, [SEARCH_KEY]: report.messages.sort(byDateDesc) }));
+      if (report.errors.length) {
+        const name = accountsById[report.errors[0].accountId]?.name ?? "Un account";
+        notify(`${name}: ricerca non riuscita (${report.errors[0].message})`, true);
+      }
+      setServerQuery({ q: asked, busy: false });
+    } catch (e) {
+      notify(errorText(e), true);
+      setServerQuery(null);
+    }
+  };
+
+  /** Scarica la pagina precedente per ogni casella presente nell'elenco. */
+  const loadOlder = async () => {
+    if (olderBusy) return;
+    const key = listKey;
+    const oldest = new Map<string, Message>();
+    for (const m of source) {
+      if (m.uid === 0 || m.id.startsWith("local:") || (!box && accountFilter !== "all" && m.accountId !== accountFilter)) continue;
+      const group = `${m.accountId}|${m.mailbox}`;
+      const known = oldest.get(group);
+      if (!known || m.uid < known.uid) oldest.set(group, m);
+    }
+    setOlderBusy(true);
+    const results = await Promise.allSettled([...oldest.values()].map((m) => api.loadOlder(m)));
+    setOlderBusy(false);
+    const found = results.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
+    const failed = results.find((r) => r.status === "rejected");
+    if (failed) notify(errorText(failed.reason), true);
+    else if (!found.length) {
+      setOlderDone((list) => [...list, key]);
+      notify("Non ci sono altri messaggi");
+    }
+    if (found.length) setByFolder((all) => ({ ...all, [olderKey(key)]: uniqueById([...(all[olderKey(key)] ?? []), ...found]).sort(byDateDesc) }));
   };
 
   const flagMany = (ms: Message[], flags: { seen?: boolean; flagged?: boolean }) => {
@@ -510,22 +687,6 @@ export function App() {
     });
   };
 
-  const move = (m: Message, to: Folder) => {
-    // Le azioni rapide agiscono anche su righe non aperte: il messaggio aperto resta dov'è.
-    if (selected?.id === m.id) {
-      const i = visible.findIndex((x) => x.id === m.id);
-      setSelectedId(visible[i + 1]?.id ?? visible[i - 1]?.id ?? null);
-    }
-    dropMessage(m.id);
-    api
-      .moveMessage(m, to)
-      .then(() => notify(to === "archive" ? "Messaggio archiviato" : "Messaggio spostato nel cestino"))
-      .catch((e) => {
-        notify(errorText(e), true);
-        refresh(m);
-      });
-  };
-
   const compose = (draft: Partial<Draft> = {}) => {
     if (accounts.length === 0) return setModal({ kind: "account" });
     const accountId = draft.accountId ?? box?.accountId ?? (accountFilter !== "all" ? accountFilter : undefined);
@@ -538,12 +699,43 @@ export function App() {
     compose({ accountId: m.accountId, to: replyTo(m), cc: others, subject: prefixed("Re:", m.subject), body: quote(m), inReplyTo: m.messageId, references: chainOf(m) });
   };
 
-  const forward = (m: Message) =>
+  /** Copia su disco gli allegati veri del messaggio; se non riesce avvisa e prosegue senza. */
+  const filesOf = async (m: Message) => {
+    const indexes = m.attachments.filter((f) => !f.inline).map((f) => f.index);
+    if (!indexes.length || m.id.startsWith("local:")) return [];
+    try {
+      return await api.prepareAttachments(m, indexes);
+    } catch (e) {
+      notify(`Allegati non recuperati: ${errorText(e)}`, true);
+      return [];
+    }
+  };
+
+  const forward = async (m: Message) => {
+    const attachments = await filesOf(m);
     compose({
       accountId: m.accountId,
       subject: prefixed("I:", m.subject),
       body: `\n\n---------- Messaggio inoltrato ----------\nDa: ${m.fromName} <${m.fromEmail}>\nData: ${longTime(m.date)}\nOggetto: ${m.subject}\n\n${m.body}`,
+      attachments,
     });
+  };
+
+  /** Riapre una bozza: il salvataggio successivo sostituisce questa copia. */
+  const resumeDraft = async (m: Message) => {
+    const attachments = await filesOf(m);
+    compose({
+      accountId: m.accountId,
+      to: m.to.map((c) => c.email),
+      cc: m.cc.map((c) => c.email),
+      subject: m.subject === "(nessun oggetto)" ? "" : m.subject,
+      body: m.body,
+      attachments,
+      inReplyTo: m.inReplyTo,
+      references: m.references,
+      draftId: m.messageId,
+    });
+  };
 
   /** Chi riceve la risposta: il mittente, oppure i destinatari se il messaggio l'ho mandato io. */
   const replyTo = (m: Message) => (isMine(m) ? m.to.map((c) => c.email) : [m.fromEmail]);
@@ -755,7 +947,10 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       if (modal || menu) return;
       const typing = e.target instanceof HTMLElement && e.target.closest("input, textarea, select, [contenteditable]");
-      if (e.ctrlKey && e.key.toLowerCase() === "k") {
+      if (e.ctrlKey && !typing && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        undoPending();
+      } else if (e.ctrlKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
         searchRef.current?.focus();
       } else if (e.ctrlKey && !typing && e.key.toLowerCase() === "a") {
@@ -786,7 +981,7 @@ export function App() {
           Object.assign(actions, {
             escape: () => setChecked([]),
             e: () => moveMany(bulk, "archive"),
-            delete: () => moveMany(bulk, "trash"),
+            delete: () => (bulk.every((m) => m.folder === "trash") ? askDeleteForever(bulk) : moveMany(bulk, "trash")),
             s: () => flagMany(bulk, { flagged: !bulk.every((m) => m.flagged) }),
             u: () => flagMany(bulk, { seen: false }),
           });
@@ -800,8 +995,8 @@ export function App() {
             r: () => reply(selected, false),
             a: () => reply(selected, true),
             f: () => forward(selected),
-            e: () => selected.folder !== "archive" && move(selected, "archive"),
-            delete: () => selected.folder !== "trash" && move(selected, "trash"),
+            e: () => moveMany([selected], "archive"),
+            delete: () => trash(selected),
             s: () => toggleStar(selected),
             u: () => !selected.unread && markUnread(selected),
           });
@@ -845,8 +1040,10 @@ export function App() {
     loaded && accounts.length === 0
       ? { title: "Nessun account", text: "Aggiungi una casella Google, Microsoft o IMAP per iniziare.", action: { label: "Aggiungi account", run: () => setModal({ kind: "account" }) } }
       : q
-        ? { title: "Nessun risultato", text: "Prova con un altro nome, oggetto o parola del testo." }
-        : syncing && !byFolder[box ? boxKey(box) : folderOf(view)]
+        ? searching
+          ? { title: serverQuery?.busy ? "Cerco sul server…" : "Nessun risultato", text: serverQuery?.busy ? "Guardo in tutte le cartelle di ogni account." : "Neanche sul server c’è un messaggio con queste parole." }
+          : { title: "Nessun risultato", text: "Tra i messaggi scaricati non c’è. Premi Invio per cercare su tutta la posta del server.", action: { label: "Cerca sul server", run: searchOnServer } }
+        : syncing && !byFolder[listKey]
           ? { title: "Sincronizzo…", text: "Scarico i messaggi dai server." }
           : view === "snoozed"
             ? { title: "Niente in attesa", text: "Con Posticipa (B) un messaggio sparisce da Posta in arrivo e torna all’ora che scegli." }
@@ -862,6 +1059,7 @@ export function App() {
         accountCount={accounts.length}
         query={query}
         onQuery={setQuery}
+        onSearchServer={searchOnServer}
         searchRef={searchRef}
         syncing={syncing > 0}
         syncLabel={syncLabel}
@@ -916,25 +1114,39 @@ export function App() {
           onCheck={checkRow}
           onCheckAll={checkAll}
           onToggleRead={toggleRead}
-          onArchive={(m) => move(m, "archive")}
-          onDelete={(m) => (m.scheduled ? cancelScheduled(m.scheduled) : move(m, "trash"))}
+          onArchive={(m) => moveMany([m], "archive")}
+          onDelete={(m) => (m.scheduled ? cancelScheduled(m.scheduled) : trash(m))}
           labelsOf={labelsOf}
           wakeOf={(m) => m.scheduled?.at ?? snoozeOf(m)}
           threadSize={(m) => (m.scheduled ? 1 : threads.size(m))}
           empty={empty}
+          serverSearch={
+            !q || visible.length === 0
+              ? null
+              : searching
+                ? { label: serverQuery?.busy ? "Cerco su tutta la posta del server…" : "Risultati dal server", busy: !!serverQuery?.busy, run: null }
+                : { label: "Cerca su tutta la posta del server (Invio)", busy: false, run: searchOnServer }
+          }
+          older={canLoadOlder && !olderDone.includes(listKey) ? { busy: olderBusy, run: loadOlder } : null}
+          onEmptyTrash={!box && view === "trash" ? askEmptyTrash : null}
         />
         <Reader
           message={selected}
           account={selected ? accountsById[selected.accountId] : undefined}
-          onArchive={(m) => move(m, "archive")}
-          onDelete={(m) => move(m, "trash")}
+          onArchive={(m) => moveMany([m], "archive")}
+          onDelete={trash}
           onToggleStar={toggleStar}
           onToggleRead={toggleRead}
           onReply={reply}
           onForward={forward}
+          onResumeDraft={resumeDraft}
           onQuickReply={quickReply}
           bulk={bulk}
-          onBulkMove={(to) => bulk && moveMany(bulk, to)}
+          onBulkMove={(to) => {
+            if (!bulk) return;
+            if (to === "trash" && bulk.every((m) => m.folder === "trash")) askDeleteForever(bulk);
+            else moveMany(bulk, to);
+          }}
           onBulkFlags={(flags) => bulk && flagMany(bulk, flags)}
           onBulkClear={() => setChecked([])}
           bulkBoxes={bulkBoxes}
@@ -979,6 +1191,11 @@ export function App() {
             draftDone(modal.draft);
             notify(`Programmato: parte ${longTime(at).toLowerCase()} da ${a.name}`);
           }}
+          onDraftsChanged={(savedNow) => {
+            if (savedNow) notify("Bozza salvata in Bozze");
+            sync("drafts");
+          }}
+          contacts={contacts}
         />
       )}
       {modal?.kind === "preview" && (
@@ -991,6 +1208,7 @@ export function App() {
           onClose={() => setModal(null)}
         />
       )}
+      {modal?.kind === "confirm" && <Confirm title={modal.title} text={modal.text} action={modal.action} onConfirm={modal.run} onClose={() => setModal(null)} />}
       {modal?.kind === "link" && <LinkChooser url={modal.url} browsers={modal.browsers} onClose={() => setModal(null)} />}
       {modal?.kind === "account" && <AddAccount onClose={() => setModal(null)} onAdded={accountAdded} />}
       {modal?.kind === "settings" && (
@@ -1019,6 +1237,11 @@ export function App() {
         <div className={toast.error ? "toast error" : "toast"} role={toast.error ? "alert" : "status"}>
           <Icon name={toast.error ? "alert" : "check"} size={16} stroke={2} />
           <span>{toast.text}</span>
+          {toast.undo && (
+            <button type="button" className="link-btn toast-undo" onClick={toast.undo}>
+              Annulla
+            </button>
+          )}
           <button type="button" className="icon-btn" style={{ width: 30, height: 30 }} aria-label="Chiudi avviso" onClick={() => setToast(null)}>
             <Icon name="close" size={12} stroke={2} />
           </button>

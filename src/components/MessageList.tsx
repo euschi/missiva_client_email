@@ -12,6 +12,8 @@ const CHIPS: { id: Chip; label: string }[] = [
   { id: "attach", label: "Con allegati" },
 ];
 
+const deleteLabel = (m: Message) => (m.scheduled ? "Annulla invio" : m.folder === "trash" ? "Elimina definitivamente" : "Sposta nel cestino");
+
 interface Props {
   title: string;
   subtitle: string;
@@ -37,9 +39,15 @@ interface Props {
   /** Messaggi nella conversazione di `m`. */
   threadSize: (m: Message) => number;
   empty: { title: string; text: string; action?: { label: string; run: () => void } };
+  /** Con una ricerca in corso: invito a cercare anche sul server. */
+  serverSearch: { label: string; busy: boolean; run: (() => void) | null } | null;
+  /** «Carica messaggi più vecchi» in fondo all'elenco. */
+  older: { busy: boolean; run: () => void } | null;
+  /** «Svuota il cestino», solo nel Cestino. */
+  onEmptyTrash: (() => void) | null;
 }
 
-export function MessageList({ title, subtitle, chip, onChip, messages, accounts, selectedId, onSelect, checkedIds, onCheck, onCheckAll, onToggleRead, onArchive, onDelete, labelsOf, wakeOf, threadSize, empty }: Props) {
+export function MessageList({ title, subtitle, chip, onChip, messages, accounts, selectedId, onSelect, checkedIds, onCheck, onCheckAll, onToggleRead, onArchive, onDelete, labelsOf, wakeOf, threadSize, empty, serverSearch, older, onEmptyTrash }: Props) {
   const groups: { label: string; items: Message[] }[] = [];
   for (const m of messages) {
     const label = groupLabel(m.date);
@@ -59,6 +67,11 @@ export function MessageList({ title, subtitle, chip, onChip, messages, accounts,
             <h1 className="list-title">{title}</h1>
             <span className="list-sub">{selecting ? `${checkedIds.length} di ${messages.length} selezionati` : subtitle}</span>
           </div>
+          {onEmptyTrash && messages.length > 0 && !selecting && (
+            <button type="button" className="check-all" onClick={onEmptyTrash}>
+              Svuota
+            </button>
+          )}
           {messages.length > 0 && (
             <button
               type="button"
@@ -83,6 +96,12 @@ export function MessageList({ title, subtitle, chip, onChip, messages, accounts,
       </div>
 
       <div className="list-scroll scroll">
+        {serverSearch && (
+          <button type="button" className="list-more top" disabled={!serverSearch.run} onClick={() => serverSearch.run?.()}>
+            <Icon name={serverSearch.busy ? "sync" : "search"} size={14} stroke={2} className={serverSearch.busy ? "spin" : undefined} />
+            {serverSearch.label}
+          </button>
+        )}
         {messages.length === 0 && (
           <div className="empty">
             <h2>{empty.title}</h2>
@@ -170,11 +189,9 @@ export function MessageList({ title, subtitle, chip, onChip, messages, accounts,
                         <Icon name="archive" size={15} stroke={1.8} />
                       </button>
                     )}
-                    {m.folder !== "trash" && (
-                      <button type="button" className="icon-btn" aria-label={m.scheduled ? "Annulla invio" : "Sposta nel cestino"} title={m.scheduled ? "Annulla invio" : "Sposta nel cestino"} onClick={() => onDelete(m)}>
-                        <Icon name="trash" size={15} stroke={1.8} />
-                      </button>
-                    )}
+                    <button type="button" className="icon-btn" aria-label={deleteLabel(m)} title={deleteLabel(m)} onClick={() => onDelete(m)}>
+                      <Icon name="trash" size={15} stroke={1.8} />
+                    </button>
                   </div>
                 )}
                 </div>
@@ -182,6 +199,12 @@ export function MessageList({ title, subtitle, chip, onChip, messages, accounts,
             })}
           </div>
         ))}
+        {older && messages.length > 0 && (
+          <button type="button" className="list-more" disabled={older.busy} onClick={older.run}>
+            {older.busy && <Icon name="sync" size={14} stroke={2} className="spin" />}
+            {older.busy ? "Scarico…" : "Carica messaggi più vecchi"}
+          </button>
+        )}
       </div>
     </section>
   );
