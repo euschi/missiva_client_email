@@ -13,7 +13,6 @@
     "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-dialog": "^2.4.0",
     "@tauri-apps/plugin-notification": "^2.8.0",
-    "@tauri-apps/plugin-opener": "^2.7.2",
     "pdfjs-dist": "5.7.284",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"

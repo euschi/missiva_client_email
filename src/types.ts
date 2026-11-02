@@ -6,6 +6,12 @@ export type Security = "tls" | "starttls";
 export type Folder = "inbox" | "drafts" | "sent" | "archive" | "trash" | "other";
 
 /** Cartella creata dall'utente sul server. */
+/** Browser installato, dalla sua voce .desktop. */
+export interface Browser {
+  id: string;
+  name: string;
+}
+
 export interface Mailbox {
   /** Nome IMAP esatto, da usare con il server. */
   path: string;

@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, errorText, inTauri } from "./api";
 import { AddAccount } from "./components/AddAccount";
 import { Compose } from "./components/Compose";
+import { LinkChooser } from "./components/LinkChooser";
 import { MessageList, type Chip } from "./components/MessageList";
 import { nextLabelColor } from "./components/Pickers";
 import { Preview } from "./components/Preview";
@@ -17,13 +18,14 @@ import { notifyNewMail } from "./notify";
 import { buildThreads } from "./threads";
 import { applyPrefs, loadPrefs, savePrefs, type Prefs } from "./prefs";
 import { keyOf, useStore, type Labels, type Snooze } from "./store";
-import type { Account, Draft, Folder, Mailbox, Message, OpenBox, Outgoing, Scheduled } from "./types";
+import type { Account, Browser, Draft, Folder, Mailbox, Message, OpenBox, Outgoing, Scheduled } from "./types";
 
 type ModalState =
   | { kind: "compose"; draft: Draft }
   | { kind: "account" }
   | { kind: "settings"; section: Section }
-  | { kind: "preview"; message: Message; index: number };
+  | { kind: "preview"; message: Message; index: number }
+  | { kind: "link"; url: string; browsers: Browser[] };
 
 /** Posta in arrivo e cartella aperta: ogni minuto. */
 const SYNC_EVERY_MS = 60_000;
@@ -85,7 +87,7 @@ export function App() {
   const [chip, setChip] = useState<Chip>("all");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // Selezione multipla (Ctrl/Maiusc + clic, Maiusc + frecce): conta solo con almeno due messaggi.
+  // Selezione multipla: caselle delle righe, Ctrl/Maiusc + clic, Maiusc + frecce.
   const [checked, setChecked] = useState<string[]>([]);
   const anchor = useRef<string | null>(null);
   const [syncing, setSyncing] = useState(0);
@@ -320,8 +322,10 @@ export function App() {
       (!q || [m.fromName, m.fromEmail, m.subject, m.body].some((s) => s.toLowerCase().includes(q))),
   );
   const selected = visible.find((m) => m.id === selectedId) ?? visible[0] ?? null;
-  const chosen = checked.length > 1 ? visible.filter((m) => checked.includes(m.id)) : [];
-  const bulk = chosen.length > 1 ? chosen : null;
+  const chosen = checked.length ? visible.filter((m) => checked.includes(m.id)) : [];
+  const bulk = chosen.length ? chosen : null;
+  const bulkAccount = bulk?.every((m) => m.accountId === bulk[0].accountId) ? bulk[0].accountId : null;
+  const bulkBoxes = (bulkAccount && mailboxes[bulkAccount]?.filter((b) => b.selectable && !b.special)) || [];
   // Conversazioni su tutte le cartelle caricate (Inviati compresa).
   const threads = useMemo(() => buildThreads(Object.values(byFolder).flatMap((list) => list ?? [])), [byFolder]);
 
@@ -395,6 +399,19 @@ export function App() {
     }
   };
 
+  /** Casella di una riga: non apre il messaggio; con Maiusc aggiunge l'intervallo dall'ultima spuntata. */
+  const checkRow = (m: Message, shift: boolean) => {
+    if (shift && anchor.current) {
+      const range = between(anchor.current, m.id);
+      setChecked((list) => [...new Set([...list, ...range])]);
+    } else {
+      setChecked((list) => (list.includes(m.id) ? list.filter((id) => id !== m.id) : [...list, m.id]));
+    }
+    anchor.current = m.id;
+  };
+
+  const checkAll = () => setChecked(chosen.length === visible.length ? [] : visible.map((m) => m.id));
+
   /** Maiusc + ↓/↑: allarga la selezione dall'àncora alla riga successiva o precedente. */
   const extend = (d: number) => {
     const i = visible.findIndex((x) => x.id === selected?.id);
@@ -408,20 +425,52 @@ export function App() {
   /** Dopo un errore riallinea la cartella del messaggio con il server. */
   const refresh = (m: Message) => (m.folder === "other" ? box && syncBox(box) : sync(m.folder));
 
-  const moveMany = (ms: Message[], to: Folder) => {
-    if (to === "trash") ms.filter((m) => m.scheduled).forEach((m) => cancelScheduled(m.scheduled!));
-    const movable = ms.filter((m) => !m.scheduled && m.folder !== to);
+  /** Svuota la selezione; se il messaggio aperto è tra quelli che se ne vanno, apre il primo rimasto. */
+  const leaveList = (ms: Message[]) => {
     const ids = new Set(ms.map((m) => m.id));
     const last = Math.max(...ms.map((m) => visible.indexOf(m)));
     const next = visible.slice(last + 1).find((m) => !ids.has(m.id)) ?? [...visible].reverse().find((m) => !ids.has(m.id));
     setChecked([]);
-    setSelectedId(next?.id ?? null);
+    if (!selected || ids.has(selected.id)) setSelectedId(next?.id ?? null);
+  };
+
+  const movedText = (n: number, to: Folder) =>
+    to === "archive"
+      ? plural(n, "messaggio archiviato", "messaggi archiviati")
+      : `${plural(n, "messaggio spostato", "messaggi spostati")} ${to === "inbox" ? "in Posta in arrivo" : "nel cestino"}`;
+
+  const moveMany = (ms: Message[], to: Folder) => {
+    if (to === "trash") ms.filter((m) => m.scheduled).forEach((m) => cancelScheduled(m.scheduled!));
+    const movable = ms.filter((m) => !m.scheduled && !m.id.startsWith("local:") && m.folder !== to);
+    leaveList(ms);
     if (!movable.length) return;
     movable.forEach((m) => dropMessage(m.id));
-    const n = movable.length;
     api
       .moveMessages(movable, to)
-      .then(() => notify(to === "archive" ? `${plural(n, "messaggio archiviato", "messaggi archiviati")}` : `${plural(n, "messaggio spostato", "messaggi spostati")} nel cestino`))
+      .then(() => {
+        notify(movedText(movable.length, to));
+        // Riporta i messaggi nell'elenco di arrivo senza aspettare il prossimo giro.
+        if (to === "inbox") sync("inbox");
+      })
+      .catch((e) => {
+        notify(errorText(e), true);
+        movable.forEach(refresh);
+      });
+  };
+
+  /** Sposta in una cartella dell'utente: i messaggi sono tutti dello stesso account. */
+  const moveToBox = (ms: Message[], target: Mailbox) => {
+    const movable = ms.filter((m) => !m.scheduled && !m.id.startsWith("local:") && m.mailbox !== target.path);
+    leaveList(ms);
+    if (!movable.length) return;
+    movable.forEach((m) => dropMessage(m.id));
+    api
+      .moveToMailbox(movable, target.path)
+      .then(() => {
+        notify(`${plural(movable.length, "messaggio spostato", "messaggi spostati")} in «${target.label}»`);
+        const open = { accountId: movable[0].accountId, mailbox: target };
+        if (byFolder[boxKey(open)]) syncBox(open, true);
+      })
       .catch((e) => {
         notify(errorText(e), true);
         movable.forEach(refresh);
@@ -453,9 +502,20 @@ export function App() {
     api.setFlags(m, { seen: false }).catch((e) => notify(errorText(e), true));
   };
 
+  const toggleRead = (m: Message) => {
+    patchMessage(m.id, { unread: !m.unread });
+    api.setFlags(m, { seen: m.unread }).catch((e) => {
+      patchMessage(m.id, { unread: m.unread });
+      notify(errorText(e), true);
+    });
+  };
+
   const move = (m: Message, to: Folder) => {
-    const i = visible.findIndex((x) => x.id === m.id);
-    setSelectedId(visible[i + 1]?.id ?? visible[i - 1]?.id ?? null);
+    // Le azioni rapide agiscono anche su righe non aperte: il messaggio aperto resta dov'è.
+    if (selected?.id === m.id) {
+      const i = visible.findIndex((x) => x.id === m.id);
+      setSelectedId(visible[i + 1]?.id ?? visible[i - 1]?.id ?? null);
+    }
     dropMessage(m.id);
     api
       .moveMessage(m, to)
@@ -572,19 +632,35 @@ export function App() {
     notify("Messaggio riportato in arrivo");
   };
 
-  const toggleLabel = (m: Message, id: string) => {
-    const k = keyOf(m);
-    const current = labels.byMessage[k] ?? [];
-    const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
-    const byMessage = { ...labels.byMessage, [k]: next };
-    if (next.length === 0) delete byMessage[k];
+  /** Se tutti i messaggi hanno già l'etichetta la toglie, altrimenti la aggiunge a tutti. */
+  const toggleLabelMany = (ms: Message[], id: string) => {
+    const everywhere = ms.every((m) => labels.byMessage[keyOf(m)]?.includes(id));
+    const byMessage = { ...labels.byMessage };
+    for (const m of ms) {
+      const k = keyOf(m);
+      const others = (byMessage[k] ?? []).filter((x) => x !== id);
+      const next = everywhere ? others : [...others, id];
+      if (next.length) byMessage[k] = next;
+      else delete byMessage[k];
+    }
     setLabels({ ...labels, byMessage });
   };
 
-  const createLabel = (m: Message, name: string) => {
+  const createLabelMany = (ms: Message[], name: string) => {
     const label = { id: crypto.randomUUID(), name, color: nextLabelColor(labels.defs) };
-    const k = keyOf(m);
-    setLabels({ defs: [...labels.defs, label], byMessage: { ...labels.byMessage, [k]: [...(labels.byMessage[k] ?? []), label.id] } });
+    const byMessage = { ...labels.byMessage };
+    for (const m of ms) byMessage[keyOf(m)] = [...(byMessage[keyOf(m)] ?? []), label.id];
+    setLabels({ defs: [...labels.defs, label], byMessage });
+  };
+
+  /** Apre il link nel browser predefinito; se non ci riesce chiede con cosa aprirlo. */
+  const openLink = async (url: string) => {
+    try {
+      await api.openLink(url);
+    } catch {
+      const browsers = await api.listBrowsers().catch(() => []);
+      setModal({ kind: "link", url, browsers });
+    }
   };
 
   const sendScheduled = async (sc: Scheduled) => {
@@ -837,6 +913,11 @@ export function App() {
           selectedId={selected?.id ?? null}
           onSelect={pick}
           checkedIds={bulk ? bulk.map((m) => m.id) : []}
+          onCheck={checkRow}
+          onCheckAll={checkAll}
+          onToggleRead={toggleRead}
+          onArchive={(m) => move(m, "archive")}
+          onDelete={(m) => (m.scheduled ? cancelScheduled(m.scheduled) : move(m, "trash"))}
           labelsOf={labelsOf}
           wakeOf={(m) => m.scheduled?.at ?? snoozeOf(m)}
           threadSize={(m) => (m.scheduled ? 1 : threads.size(m))}
@@ -848,7 +929,7 @@ export function App() {
           onArchive={(m) => move(m, "archive")}
           onDelete={(m) => move(m, "trash")}
           onToggleStar={toggleStar}
-          onMarkUnread={markUnread}
+          onToggleRead={toggleRead}
           onReply={reply}
           onForward={forward}
           onQuickReply={quickReply}
@@ -856,18 +937,25 @@ export function App() {
           onBulkMove={(to) => bulk && moveMany(bulk, to)}
           onBulkFlags={(flags) => bulk && flagMany(bulk, flags)}
           onBulkClear={() => setChecked([])}
+          bulkBoxes={bulkBoxes}
+          bulkMixed={!!bulk && !bulkAccount}
+          onBulkMoveBox={(target) => bulk && moveToBox(bulk, target)}
+          bulkLabelIds={bulk ? labels.defs.filter((l) => bulk.every((m) => labels.byMessage[keyOf(m)]?.includes(l.id))).map((l) => l.id) : []}
+          onBulkToggleLabel={(id) => bulk && toggleLabelMany(bulk, id)}
+          onBulkCreateLabel={(name) => bulk && createLabelMany(bulk, name)}
           thread={selected ? threads.of(selected) : []}
           trustedSenders={trusted}
           onTrustSender={(email) => setTrusted([...new Set([...trusted, email.toLowerCase()])])}
           onPreview={(m, index) => setModal({ kind: "preview", message: m, index })}
+          onLink={openLink}
           onMailto={(address) => compose({ to: [address] })}
           remoteImages={prefs.remoteImages}
           menu={menu}
           onMenu={setMenu}
           labels={labels.defs}
           messageLabels={selected ? labelsOf(selected) : []}
-          onToggleLabel={toggleLabel}
-          onCreateLabel={createLabel}
+          onToggleLabel={(m, id) => toggleLabelMany([m], id)}
+          onCreateLabel={(m, name) => createLabelMany([m], name)}
           snoozedUntil={selected ? snoozeOf(selected) : undefined}
           onSnooze={snooze}
           onUnsnooze={unsnooze}
@@ -903,6 +991,7 @@ export function App() {
           onClose={() => setModal(null)}
         />
       )}
+      {modal?.kind === "link" && <LinkChooser url={modal.url} browsers={modal.browsers} onClose={() => setModal(null)} />}
       {modal?.kind === "account" && <AddAccount onClose={() => setModal(null)} onAdded={accountAdded} />}
       {modal?.kind === "settings" && (
         <Settings
