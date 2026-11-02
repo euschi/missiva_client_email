@@ -1,6 +1,7 @@
 mod accounts;
 mod autoconfig;
 mod browsers;
+mod calendar;
 mod error;
 mod imap_client;
 mod mail;
@@ -73,6 +74,7 @@ fn new_account(provider: Provider, email: String, display_name: Option<String>, 
         smtp,
         sync_days,
         signature: String::new(),
+        signatures: Vec::new(),
     })
 }
 
@@ -85,14 +87,88 @@ fn persist(acc: Account, secret: &Secret) -> Result<Account> {
 }
 
 #[tauri::command]
-async fn add_imap_account(input: ImapInput) -> Result<Account> {
+async fn add_imap_account(handle: AppHandle, input: ImapInput) -> Result<Account> {
     let email = input.email.trim().to_string();
     let acc = new_account(Provider::Imap, email, None, input.imap, input.smtp, input.sync_days)?;
     let auth = Auth::Password(input.password.clone());
     // Verifica le credenziali prima di salvare.
     let probe = acc.clone();
     blocking(move || imap_client::connect(&probe, &auth).map(|mut s| { let _ = s.logout(); })).await?;
-    persist(acc, &Secret::Password { password: input.password })
+    let saved = persist(acc, &Secret::Password { password: input.password })?;
+    watchers::refresh(&handle);
+    Ok(saved)
+}
+
+/// Avvisa il frontend appena cambia la posta in arrivo di un account, con IMAP IDLE.
+mod watchers {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use serde::Serialize;
+    use tauri::{AppHandle, Emitter};
+
+    use super::{accounts, auth_for, blocking, imap_client};
+    use imap_client::IdleOutcome;
+
+    /// Si rientra in IDLE periodicamente: i server chiudono le sessioni ferme da troppo.
+    const WAIT: Duration = Duration::from_secs(5 * 60);
+    const RETRY_MIN: u64 = 30;
+    const RETRY_MAX: u64 = 600;
+
+    static RUNNING: Mutex<Option<HashMap<String, Arc<AtomicBool>>>> = Mutex::new(None);
+
+    #[derive(Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct MailChanged {
+        account_id: String,
+    }
+
+    /// Allinea i controlli agli account configurati: da chiamare all'avvio e quando cambiano.
+    pub fn refresh(handle: &AppHandle) {
+        let Ok(all) = accounts::load() else { return };
+        let mut guard = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        let running = guard.get_or_insert_with(HashMap::new);
+        running.retain(|id, stop| {
+            let keep = all.iter().any(|a| &a.id == id);
+            if !keep {
+                stop.store(true, Ordering::Relaxed);
+            }
+            keep
+        });
+        for acc in all {
+            if !running.contains_key(&acc.id) {
+                let stop = Arc::new(AtomicBool::new(false));
+                running.insert(acc.id.clone(), stop.clone());
+                tauri::async_runtime::spawn(watch(handle.clone(), acc, stop));
+            }
+        }
+    }
+
+    async fn watch(handle: AppHandle, acc: accounts::Account, stop: Arc<AtomicBool>) {
+        let mut retry = RETRY_MIN;
+        while !stop.load(Ordering::Relaxed) {
+            let attempt = async {
+                let auth = auth_for(&acc).await?;
+                let account = acc.clone();
+                blocking(move || imap_client::idle_once(&account, &auth, WAIT)).await
+            };
+            match attempt.await {
+                Ok(IdleOutcome::Changed) => {
+                    retry = RETRY_MIN;
+                    let _ = handle.emit("mail-changed", MailChanged { account_id: acc.id.clone() });
+                }
+                Ok(IdleOutcome::TimedOut) => retry = RETRY_MIN,
+                Ok(IdleOutcome::Unsupported) => return,
+                // Senza rete o con il server giù: resta la sincronizzazione periodica.
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_secs(retry)).await;
+                    retry = (retry * 2).min(RETRY_MAX);
+                }
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -111,7 +187,9 @@ async fn add_oauth_account(handle: AppHandle, provider: Provider, sync_days: u32
         Server { host: smtp.into(), port: 587, security: accounts::Security::Starttls },
         sync_days,
     )?;
-    persist(acc, &authz.secret)
+    let saved = persist(acc, &authz.secret)?;
+    watchers::refresh(&handle);
+    Ok(saved)
 }
 
 #[derive(Deserialize)]
@@ -122,6 +200,7 @@ struct AccountPatch {
     display_name: Option<String>,
     color: Option<String>,
     signature: Option<String>,
+    signatures: Option<Vec<accounts::Signature>>,
 }
 
 #[tauri::command]
@@ -140,6 +219,9 @@ fn update_account(patch: AccountPatch) -> Result<Account> {
     if let Some(v) = patch.signature {
         acc.signature = v;
     }
+    if let Some(v) = patch.signatures {
+        acc.signatures = v;
+    }
     let updated = acc.clone();
     accounts::save(&all)?;
     Ok(updated)
@@ -155,12 +237,13 @@ fn reorder_accounts(ids: Vec<String>) -> Result<Vec<Account>> {
 }
 
 #[tauri::command]
-fn remove_account(id: String) -> Result<()> {
+fn remove_account(handle: AppHandle, id: String) -> Result<()> {
     let mut all = accounts::load()?;
     all.retain(|a| a.id != id);
     accounts::save(&all)?;
     secrets::delete(&id)?;
     mail::clear_cache(&id);
+    watchers::refresh(&handle);
     Ok(())
 }
 
@@ -376,7 +459,7 @@ async fn load_older(target: MessageRef) -> Result<Vec<Message>> {
 
 /// Cerca sul server in tutti gli account, in parallelo; gli errori restano per account.
 #[tauri::command]
-async fn search_mail(query: String) -> Result<SyncReport> {
+async fn search_mail(query: imap_client::SearchQuery) -> Result<SyncReport> {
     let tasks: Vec<_> = accounts::load()?
         .into_iter()
         .map(|acc| {
@@ -454,6 +537,204 @@ async fn empty_trash(account: Option<String>) -> Result<()> {
             mail::write_cache(&acc.id, Folder::Trash.key(), &[])
         })
         .await?;
+    }
+    Ok(())
+}
+
+/// Segna come spam: sposta i messaggi nella cartella Spam del loro account.
+#[tauri::command]
+async fn mark_spam(targets: Vec<MessageRef>) -> Result<()> {
+    for (target, uids) in by_mailbox(targets) {
+        let acc = accounts::get(&target.account_id)?;
+        let auth = auth_for(&acc).await?;
+        blocking(move || {
+            imap_client::move_to_junk(&acc, &auth, &target.mailbox, &uids)?;
+            mail::update_cache(&acc.id, &target.bucket(), |msgs| msgs.retain(|m| !uids.contains(&m.uid)))
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn create_mailbox(account: String, parent: Option<String>, name: String, delimiter: String) -> Result<String> {
+    let acc = accounts::get(&account)?;
+    let auth = auth_for(&acc).await?;
+    blocking(move || imap_client::create_mailbox(&acc, &auth, parent.as_deref(), &name, &delimiter)).await
+}
+
+#[tauri::command]
+async fn rename_mailbox(account: String, path: String, name: String, delimiter: String) -> Result<()> {
+    let acc = accounts::get(&account)?;
+    let auth = auth_for(&acc).await?;
+    blocking(move || imap_client::rename_mailbox(&acc, &auth, &path, &name, &delimiter)).await
+}
+
+#[tauri::command]
+async fn delete_mailbox(account: String, path: String) -> Result<()> {
+    let acc = accounts::get(&account)?;
+    let auth = auth_for(&acc).await?;
+    blocking(move || imap_client::delete_mailbox(&acc, &auth, &path)).await
+}
+
+/// Salva un allegato nel percorso scelto dall'utente.
+#[tauri::command]
+async fn save_attachment(target: MessageRef, index: usize, path: String) -> Result<()> {
+    let raw = raw_message(target).await?;
+    blocking(move || {
+        let (_, bytes) = mail::attachment(&raw, index)?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    })
+    .await
+}
+
+/// Salva più allegati in una cartella, senza sovrascrivere nulla. Restituisce quanti.
+#[tauri::command]
+async fn save_attachments(target: MessageRef, indexes: Vec<usize>, dir: String) -> Result<usize> {
+    let raw = raw_message(target).await?;
+    blocking(move || {
+        let dir = std::path::PathBuf::from(dir);
+        for &index in &indexes {
+            let (name, bytes) = mail::attachment(&raw, index)?;
+            std::fs::write(mail::free_path(&dir, &mail::safe_name(&name)), bytes)?;
+        }
+        Ok(indexes.len())
+    })
+    .await
+}
+
+/// Esporta il messaggio originale in un file .eml.
+#[tauri::command]
+async fn export_eml(target: MessageRef, path: String) -> Result<()> {
+    let raw = raw_message(target).await?;
+    blocking(move || Ok(std::fs::write(path, raw)?)).await
+}
+
+#[tauri::command]
+async fn unsubscribe_info(target: MessageRef) -> Result<Option<mail::Unsubscribe>> {
+    let raw = raw_message(target).await?;
+    Ok(mail::unsubscribe_info(&raw))
+}
+
+/// Disiscrizione con un clic (RFC 8058): solo su https, solo quando lo chiede l'utente.
+#[tauri::command]
+async fn unsubscribe_post(url: String) -> Result<()> {
+    let parsed = url::Url::parse(&url).map_err(|_| msg("Indirizzo di disiscrizione non valido"))?;
+    if parsed.scheme() != "https" {
+        return Err(msg("La disiscrizione automatica richiede https"));
+    }
+    let response = reqwest::Client::new()
+        .post(parsed)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("List-Unsubscribe=One-Click")
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| msg(format!("Disiscrizione non riuscita: {e}")))?;
+    if !response.status().is_success() {
+        return Err(msg(format!("Il mittente ha risposto {}", response.status())));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn calendar_invite(target: MessageRef) -> Result<Option<calendar::Invite>> {
+    let raw = raw_message(target).await?;
+    Ok(calendar::ics_of(&raw).and_then(|ics| calendar::parse(&ics)))
+}
+
+/// Risponde a un invito: accepted, tentative o declined.
+#[tauri::command]
+async fn respond_invite(target: MessageRef, status: String) -> Result<()> {
+    let acc = accounts::get(&target.account_id)?;
+    let raw = raw_message(target).await?;
+    let auth = auth_for(&acc).await?;
+    blocking(move || {
+        let ics = calendar::ics_of(&raw).ok_or_else(|| msg("Il messaggio non contiene un invito"))?;
+        let (to, subject, reply) = calendar::reply(&ics, &acc.email, &status)?;
+        smtp::send(&acc, &auth, &smtp::build_invite_reply(&acc, &to, &subject, &reply)?)
+    })
+    .await
+}
+
+/// Il server di invio dell'account risponde? Distingue «sei offline» da un errore vero.
+fn smtp_reachable(acc: &Account) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let timeout = std::time::Duration::from_secs(5);
+    (acc.smtp.host.as_str(), acc.smtp.port)
+        .to_socket_addrs()
+        .is_ok_and(|mut addrs| addrs.any(|a| TcpStream::connect_timeout(&a, timeout).is_ok()))
+}
+
+#[tauri::command]
+async fn server_reachable(account: String) -> Result<bool> {
+    let acc = accounts::get(&account)?;
+    blocking(move || Ok(smtp_reachable(&acc))).await
+}
+
+#[tauri::command]
+async fn gmail_set_label(targets: Vec<MessageRef>, message_ids: Vec<String>, label: String, on: bool) -> Result<()> {
+    if on {
+        for (target, uids) in by_mailbox(targets) {
+            let acc = accounts::get(&target.account_id)?;
+            if acc.provider != Provider::Google {
+                continue;
+            }
+            let auth = auth_for(&acc).await?;
+            let label = label.clone();
+            blocking(move || imap_client::gmail_add_label(&acc, &auth, &target.mailbox, &uids, &label)).await?;
+        }
+    } else {
+        for (target, id) in targets.into_iter().zip(message_ids) {
+            let acc = accounts::get(&target.account_id)?;
+            if acc.provider != Provider::Google {
+                continue;
+            }
+            let auth = auth_for(&acc).await?;
+            let label = label.clone();
+            blocking(move || imap_client::gmail_remove_label(&acc, &auth, &id, &label)).await?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn gmail_label_members(account: String, label: String) -> Result<Option<imap_client::LabelMembers>> {
+    let acc = accounts::get(&account)?;
+    if acc.provider != Provider::Google {
+        return Ok(None);
+    }
+    let auth = auth_for(&acc).await?;
+    blocking(move || imap_client::gmail_label_members(&acc, &auth, &label)).await
+}
+
+/// Il link mailto: tra gli argomenti con cui è stata avviata l'app.
+fn mailto_arg<S: AsRef<str>>(args: &[S]) -> Option<String> {
+    args.iter().map(AsRef::as_ref).find(|a| a.to_ascii_lowercase().starts_with("mailto:")).map(str::to_string)
+}
+
+#[tauri::command]
+fn initial_mailto() -> Option<String> {
+    mailto_arg(&std::env::args().collect::<Vec<_>>())
+}
+
+const DESKTOP_ID: &str = "missiva.desktop";
+
+/// Missiva è l'applicazione predefinita per i link mailto:?
+#[tauri::command]
+fn is_default_mail_client() -> bool {
+    std::process::Command::new("xdg-mime")
+        .args(["query", "default", "x-scheme-handler/mailto"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == DESKTOP_ID)
+}
+
+#[tauri::command]
+fn set_default_mail_client() -> Result<()> {
+    let status = std::process::Command::new("xdg-mime").args(["default", DESKTOP_ID, "x-scheme-handler/mailto"]).status()?;
+    if !status.success() {
+        return Err(msg("Il sistema non ha accettato la modifica"));
     }
     Ok(())
 }
@@ -536,7 +817,8 @@ async fn send_scheduled_now(handle: AppHandle, id: String) -> Result<()> {
     }
     match flush_outbox(&handle).await.into_iter().find(|(sid, _)| *sid == id) {
         Some((_, Some(e))) => Err(msg(e)),
-        _ => Ok(()),
+        Some((_, None)) => Ok(()),
+        None => Err(msg("Nessuna connessione: il messaggio parte appena torna")),
     }
 }
 
@@ -561,6 +843,11 @@ async fn flush_outbox(handle: &AppHandle) -> Vec<(String, Option<String>)> {
     };
     let mut results = Vec::new();
     for s in due {
+        // Senza rete non è un tentativo fallito: il messaggio aspetta che torni.
+        let Ok(acc) = accounts::get(&s.outgoing.account_id) else { continue };
+        if !blocking(move || Ok(smtp_reachable(&acc))).await.unwrap_or(false) {
+            continue;
+        }
         let error = deliver(s.outgoing.clone()).await.err().map(|e| e.to_string());
         // Dopo un errore riprova tra un minuto, fino a MAX_ATTEMPTS.
         let final_error = outbox::update(|all| {
@@ -591,8 +878,8 @@ async fn flush_outbox(handle: &AppHandle) -> Vec<(String, Option<String>)> {
     results
 }
 
-/// File JSON condivisi con il frontend (posticipi ed etichette) in ~/.config/missiva/.
-const STORES: [&str; 3] = ["snoozed", "labels", "trusted"];
+/// File JSON condivisi con il frontend (posticipi, etichette, regole, modelli…) in ~/.config/missiva/.
+const STORES: [&str; 5] = ["snoozed", "labels", "trusted", "rules", "templates"];
 
 fn store_path(name: &str) -> Result<std::path::PathBuf> {
     if !STORES.contains(&name) {
@@ -692,7 +979,12 @@ pub fn run() {
     tauri::Builder::default()
         // Deve essere il primo plugin: un secondo avvio (menu applicazioni, clic su una notifica)
         // riporta in primo piano la finestra già aperta invece di creare un'altra istanza.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| tray::show_main(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            tray::show_main(app);
+            if let Some(url) = mailto_arg(&args) {
+                let _ = app.emit("open-mailto", url);
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -702,6 +994,7 @@ pub fn run() {
             if let Err(e) = tray::setup(app) {
                 eprintln!("Area di notifica non disponibile: {e}");
             }
+            watchers::refresh(app.handle());
             // Invio dei messaggi programmati, anche con la finestra nascosta.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -732,6 +1025,23 @@ pub fn run() {
             delete_draft,
             delete_forever,
             empty_trash,
+            mark_spam,
+            create_mailbox,
+            rename_mailbox,
+            delete_mailbox,
+            save_attachment,
+            save_attachments,
+            export_eml,
+            unsubscribe_info,
+            unsubscribe_post,
+            calendar_invite,
+            respond_invite,
+            server_reachable,
+            gmail_set_label,
+            gmail_label_members,
+            initial_mailto,
+            is_default_mail_client,
+            set_default_mail_client,
             open_link,
             list_browsers,
             open_link_with,

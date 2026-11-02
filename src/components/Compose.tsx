@@ -1,8 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, errorText, inTauri } from "../api";
 import { initials, monoOf, providerLabel } from "../format";
 import { Icon, type IconName } from "../icons";
 import { hasFormatting, toHtml } from "../markdown";
+import type { Template } from "../store";
 import type { Account, Contact, Draft, Outgoing } from "../types";
 import { CloseButton, Modal } from "./Modal";
 import { Popover, WhenPicker } from "./Pickers";
@@ -11,7 +13,12 @@ interface Props {
   accounts: Account[];
   draft: Draft;
   onClose: () => void;
-  onSent: (account: Account, outgoing: Outgoing) => void;
+  /** Pronto a partire: l'app lo spedisce dopo il tempo per annullare. */
+  onQueued: (account: Account, outgoing: Outgoing, meta: { savedIn: string | null; replaces?: string }) => void;
+  /** Secondi per annullare l'invio. */
+  sendDelay: number;
+  templates: Template[];
+  onTemplates: (list: Template[]) => void;
   onScheduled: (account: Account, at: number) => void;
   /** La cartella Bozze è cambiata; `saved` se Missiva vi ha appena lasciato la bozza. */
   onDraftsChanged: (saved: boolean) => void;
@@ -141,7 +148,7 @@ const FORMATS: Format[] = [
   { icon: "quote", label: "Citazione", apply: (t) => ({ text: (t || "").split("\n").map((l) => `> ${l}`).join("\n") }) },
 ];
 
-export function Compose({ accounts, draft, onClose, onSent, onScheduled, onDraftsChanged, contacts }: Props) {
+export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templates, onTemplates, onScheduled, onDraftsChanged, contacts }: Props) {
   const [fromId, setFromId] = useState(draft.accountId ?? accounts[0]?.id);
   const [picking, setPicking] = useState(false);
   const [to, setTo] = useState(draft.to);
@@ -155,6 +162,11 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled, onDraft
   const [sending, setSending] = useState(false);
   const [later, setLater] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [keepQuote, setKeepQuote] = useState(true);
+  const [signatureId, setSignatureId] = useState("default");
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [templateName, setTemplateName] = useState("");
+  const [dropping, setDropping] = useState(false);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   // Selezione da ripristinare subito dopo un comando di formattazione, prima che arrivi altro input.
   const pendingSelection = useRef<[number, number] | null>(null);
@@ -170,6 +182,9 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled, onDraft
 
   const formatted = hasFormatting(body);
 
+  const signatureText =
+    signatureId === "none" ? "" : (from?.signatures ?? []).find((x) => x.id === signatureId)?.text ?? from?.signature ?? "";
+
   // Il Message-ID resta lo stesso per tutta la bozza: è ciò che lega i salvataggi successivi.
   const messageId = useRef(draft.draftId ?? `${crypto.randomUUID()}@${from?.email.split("@")[1] || "missiva.local"}`);
   const outgoing = (): Outgoing => ({
@@ -184,8 +199,12 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled, onDraft
     inReplyTo: draft.inReplyTo,
     references: draft.references ?? [],
     messageId: messageId.current,
+    quote: keepQuote ? (draft.quote ?? null) : null,
+    quoteHtml: keepQuote ? (draft.quoteHtml ?? null) : null,
+    signature: signatureText,
+    signatureHtml: hasFormatting(signatureText) ? toHtml(signatureText) : null,
   });
-  const snapshot = JSON.stringify([from?.id, to, cc, bcc, subject, body, files]);
+  const snapshot = JSON.stringify([from?.id, to, cc, bcc, subject, body, files, keepQuote, signatureId]);
   // Stato dell'ultimo render, per chi legge dopo un'attesa: conferma dei destinatari al blur compresa.
   const latest = useRef({ outgoing, snapshot });
   latest.current = { outgoing, snapshot };
@@ -272,24 +291,69 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled, onDraft
     setError(null);
     setSending(true);
     const out = latest.current.outgoing();
+    // I destinatari possono essere cambiati con la conferma al blur: si ricontrollano ora.
+    if (out.to.length === 0 || [...out.to, ...out.cc, ...out.bcc].some((v) => !EMAIL.test(v))) {
+      setError("Controlla gli indirizzi dei destinatari");
+      setSending(false);
+      return;
+    }
     try {
       if (at) {
         await api.scheduleMessage(out, at);
+        await saving.current.catch(() => {});
+        if (savedIn.current) {
+          await api.deleteDraft(savedIn.current, messageId.current).catch(() => {});
+          onDraftsChanged(false);
+        }
+        onScheduled(from, at);
       } else {
-        await api.sendMessage(out);
+        // Mentre si può ancora annullare il messaggio resta in Bozze: uscendo dall'app non si perde.
+        if (sendDelay > 0 && canSave) await persist().catch(() => {});
+        else await saving.current.catch(() => {});
+        onQueued(from, out, { savedIn: savedIn.current, replaces: draft.replaces });
       }
-      // Partito: la bozza non serve più. Un errore qui non deve far credere che l'invio sia fallito.
-      await saving.current.catch(() => {});
-      if (savedIn.current) {
-        await api.deleteDraft(savedIn.current, messageId.current).catch(() => {});
-        onDraftsChanged(false);
-      }
-      if (at) onScheduled(from, at);
-      else onSent(from, out);
     } catch (e) {
       setError(errorText(e));
       setSending(false);
     }
+  };
+
+  // File trascinati sulla finestra Scrivi: li consegna il sistema, con il percorso.
+  useEffect(() => {
+    if (!inTauri) return;
+    let off: (() => void) | undefined;
+    let gone = false;
+    getCurrentWebview()
+      .onDragDropEvent((e) => {
+        if (e.payload.type === "drop") {
+          const dropped = e.payload.paths;
+          setFiles((list) => [...list, ...dropped.filter((f) => !list.includes(f))]);
+          setDropping(false);
+        } else {
+          setDropping(e.payload.type !== "leave");
+        }
+      })
+      .then((f) => {
+        if (gone) f();
+        else off = f;
+      });
+    return () => {
+      gone = true;
+      off?.();
+    };
+  }, []);
+
+  const applyTemplate = (t: Template) => {
+    setTemplatesOpen(false);
+    setBody(body.trim() ? `${t.body}\n\n${body}` : t.body);
+    if (!subject.trim()) setSubject(t.subject);
+  };
+
+  const saveTemplate = () => {
+    const name = templateName.trim();
+    if (!name) return;
+    onTemplates([...templates.filter((t) => t.name !== name), { id: crypto.randomUUID(), name, subject, body }]);
+    setTemplateName("");
   };
 
   const format = (f: Format) => {
@@ -405,7 +469,7 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled, onDraft
           </label>
         </div>
 
-        <div className="compose-paper">
+        <div className={dropping ? "compose-paper dropping" : "compose-paper"}>
           <div role="toolbar" aria-label="Formattazione e allegati" className="compose-toolbar">
             {FORMATS.map((f) => (
               <button
@@ -425,6 +489,33 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled, onDraft
             <button type="button" className="icon-btn" aria-label="Allega file" title={inTauri ? "Allega file" : "Disponibile nell’app"} onClick={attach} disabled={!inTauri}>
               <Icon name="clip" size={15} stroke={2} />
             </button>
+            <span className="pop-anchor">
+              <button type="button" className="icon-btn" aria-label="Modelli" title="Modelli" aria-expanded={templatesOpen} onClick={() => setTemplatesOpen(!templatesOpen)}>
+                <Icon name="draft" size={15} stroke={2} />
+              </button>
+              {templatesOpen && (
+                <Popover label="Modelli" onClose={() => setTemplatesOpen(false)}>
+                  <div className="pop-title">Modelli</div>
+                  <div className="pop-scroll scroll">
+                    {templates.length === 0 && <div className="pop-empty">Nessun modello. Scrivi il messaggio e salvalo qui sotto.</div>}
+                    {templates.map((t) => (
+                      <div key={t.id} className="template-row">
+                        <button type="button" className="pop-item" title={t.subject} onClick={() => applyTemplate(t)}>
+                          <span className="suggestion-name">{t.name}</span>
+                        </button>
+                        <button type="button" className="icon-btn" aria-label={`Elimina il modello ${t.name}`} title="Elimina" onClick={() => onTemplates(templates.filter((x) => x.id !== t.id))}>
+                          <Icon name="close" size={11} stroke={2.4} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <form className="pop-custom" onSubmit={(e) => (e.preventDefault(), saveTemplate())}>
+                    <input type="text" aria-label="Nome del nuovo modello" placeholder="Salva questo testo come…" value={templateName} onChange={(e) => setTemplateName(e.target.value)} />
+                    <button type="submit" className="btn btn-soft btn-sm" disabled={!templateName.trim() || !body.trim()}>Salva</button>
+                  </form>
+                </Popover>
+              )}
+            </span>
             <span className="hint">{formatted ? "Inviato in HTML e testo semplice" : "Testo semplice"}</span>
           </div>
           <div className="compose-scroll scroll" onClick={(e) => e.target === e.currentTarget && bodyRef.current?.focus()}>
@@ -440,10 +531,32 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled, onDraft
                 onFocus={(e) => draft.inReplyTo && e.currentTarget.setSelectionRange(0, 0)}
               />
             </label>
-            {from?.signature.trim() && (
+            {(signatureText.trim() || (from?.signatures ?? []).length > 0) && (
               <div className="signature">
-                <strong>{from.displayName}</strong>
-                <span>{from.signature}</span>
+                {(from?.signatures ?? []).length > 0 && (
+                  <label className="signature-pick">
+                    <span className="sr-only">Firma</span>
+                    <select value={signatureId} onChange={(e) => setSignatureId(e.target.value)}>
+                      <option value="default">Firma predefinita</option>
+                      {(from?.signatures ?? []).map((x) => (
+                        <option key={x.id} value={x.id}>{x.name}</option>
+                      ))}
+                      <option value="none">Nessuna firma</option>
+                    </select>
+                  </label>
+                )}
+                {signatureText.trim() && (
+                  <>
+                    <strong>{from?.displayName}</strong>
+                    <span>{signatureText}</span>
+                  </>
+                )}
+              </div>
+            )}
+            {draft.quote && keepQuote && (
+              <div className="quote-chip">
+                <span>Messaggio originale incluso</span>
+                <button type="button" className="link-btn" onClick={() => setKeepQuote(false)}>Togli</button>
               </div>
             )}
             {files.length > 0 && (

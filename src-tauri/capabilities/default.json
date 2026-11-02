@@ -13,6 +13,8 @@
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "notification:default",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "core:webview:allow-print"
   ]
 }

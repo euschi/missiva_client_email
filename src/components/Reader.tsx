@@ -3,12 +3,12 @@ import { api } from "../api";
 import { fileSize, initials, longTime, monoOf, paragraphs, plural, providerLabel } from "../format";
 import { Icon } from "../icons";
 import type { Label } from "../store";
-import type { Account, Folder, HtmlView, Mailbox, Message, Scheduled } from "../types";
+import type { Account, Attachment, Folder, HtmlView, Invite, Mailbox, Message, Scheduled, Unsubscribe } from "../types";
 import { MailFrame } from "./MailFrame";
 import { LabelChips, LabelPicker, Popover, WhenPicker } from "./Pickers";
 import { isImage, Thumb } from "./Preview";
 
-export type ReaderMenu = "snooze" | "label" | "move" | null;
+export type ReaderMenu = "snooze" | "label" | "move" | "more" | null;
 
 interface Props {
   message: Message | null;
@@ -24,9 +24,18 @@ interface Props {
   onQuickReply: (m: Message, text: string) => Promise<boolean>;
   /** Apre il visore sull'allegato `index`. */
   onPreview: (m: Message, index: number) => void;
-  /** Clic su un link http(s) nel testo del messaggio. */
-  onLink: (url: string) => void;
-  onMailto: (address: string) => void;
+  /** Clic su un link http(s) nel testo del messaggio, con il testo che mostrava. */
+  onLink: (url: string, text: string) => void;
+  /** Clic su un link mailto:, intero. */
+  onMailto: (href: string) => void;
+  onSpam: (m: Message) => void;
+  onBulkSpam: () => void;
+  onPrint: () => void;
+  onExport: (m: Message) => void;
+  onSaveAttachment: (m: Message, file: Attachment) => void;
+  onSaveAll: (m: Message, files: Attachment[]) => void;
+  onUnsubscribe: (m: Message, info: Unsubscribe) => void;
+  onRespondInvite: (m: Message, status: "accepted" | "tentative" | "declined") => void;
   /** Preferenza: carica subito immagini e stili remoti. */
   remoteImages: boolean;
   /** Conversazione del messaggio aperto, dal più vecchio (vuota se non calcolata). */
@@ -140,6 +149,24 @@ export function Reader(p: Props) {
                 </Popover>
               )}
             </span>
+            <span className="pop-anchor">
+              <button type="button" className="icon-btn lg" aria-label="Altre azioni" title="Altre azioni" aria-expanded={p.menu === "more"} disabled={!m} onClick={() => toggle("more")}>
+                <Icon name="more" size={17} stroke={2.4} />
+              </button>
+              {m && p.menu === "more" && (
+                <Popover label="Altre azioni" onClose={close}>
+                  <button type="button" className="pop-item" onClick={() => (close(), p.onSpam(m))}>
+                    <span className="label-name"><Icon name="ban" size={15} stroke={1.8} />Segnala come spam</span>
+                  </button>
+                  <button type="button" className="pop-item" onClick={() => (close(), p.onPrint())}>
+                    <span className="label-name"><Icon name="print" size={15} stroke={1.8} />Stampa o salva in PDF</span>
+                  </button>
+                  <button type="button" className="pop-item" disabled={m.id.startsWith("local:")} onClick={() => (close(), p.onExport(m))}>
+                    <span className="label-name"><Icon name="download" size={15} stroke={1.8} />Esporta in .eml</span>
+                  </button>
+                </Popover>
+              )}
+            </span>
           </div>
           <div className="toolbar-group end">
             {m?.folder === "drafts" && (
@@ -201,6 +228,70 @@ function ScheduledBar({ s, account, onSendScheduled, onEditScheduled, onCancelSc
   );
 }
 
+/** Informazione letta dal messaggio completo quando lo si apre; `null` finché non c'è o se non serve. */
+function useMessageInfo<T>(m: Message, wanted: boolean, cache: Map<string, T | null>, read: (m: Message) => Promise<T | null>): T | null {
+  const [value, setValue] = useState<T | null>(() => cache.get(m.id) ?? null);
+  useEffect(() => {
+    if (!wanted) return setValue(null);
+    if (cache.has(m.id)) return setValue(cache.get(m.id) ?? null);
+    setValue(null);
+    let gone = false;
+    read(m)
+      // Senza rete la lettura fallisce in silenzio: è un di più, non il messaggio.
+      .catch(() => null)
+      .then((v) => {
+        cache.set(m.id, v);
+        if (!gone) setValue(v);
+      });
+    return () => {
+      gone = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [m.id, wanted]);
+  return value;
+}
+
+const unsubscribeCache = new Map<string, Unsubscribe | null>();
+const inviteCache = new Map<string, Invite | null>();
+
+/** Invito di calendario con le risposte per l'organizzatore. */
+function InviteCard({ invite, onRespond }: { invite: Invite; onRespond: (status: "accepted" | "tentative" | "declined") => void }) {
+  const [answered, setAnswered] = useState<string | null>(null);
+  const when = invite.start
+    ? invite.allDay
+      ? new Date(invite.start * 1000).toLocaleDateString("it-IT", { weekday: "long", day: "numeric", month: "long", year: "numeric" })
+      : new Date(invite.start * 1000).toLocaleString("it-IT", { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" })
+    : null;
+  const answer = (status: "accepted" | "tentative" | "declined", label: string) => {
+    setAnswered(label);
+    onRespond(status);
+  };
+  return (
+    <div className="invite-card">
+      <Icon name="calendar" size={18} stroke={1.8} />
+      <div className="invite-main">
+        <strong>{invite.method === "CANCEL" ? `Annullato: ${invite.summary}` : invite.summary}</strong>
+        {when && <span>{when}</span>}
+        {invite.location && <span>{invite.location}</span>}
+        {invite.organizer && <span className="paper-muted">Organizza {invite.organizer}</span>}
+      </div>
+      {invite.method === "REQUEST" && invite.organizer && (
+        <div className="invite-actions">
+          {answered ? (
+            <span className="paper-muted">{answered}</span>
+          ) : (
+            <>
+              <button type="button" className="btn btn-soft btn-sm" onClick={() => answer("accepted", "Hai accettato")}>Accetta</button>
+              <button type="button" className="btn btn-soft btn-sm" onClick={() => answer("tentative", "Hai risposto forse")}>Forse</button>
+              <button type="button" className="btn btn-soft btn-sm" onClick={() => answer("declined", "Hai rifiutato")}>Rifiuta</button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** HTML già convertito per messaggio: riaprire un messaggio non lo rilegge dal disco. */
 const htmlCache = new Map<string, HtmlView | null>();
 
@@ -251,6 +342,11 @@ function Letter(p: Props & { message: Message }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [m.id]);
 
+  const onServer = !m.scheduled && !m.id.startsWith("local:");
+  const unsubscribe = useMessageInfo(m, onServer && !mine(m), unsubscribeCache, api.unsubscribeInfo);
+  const invite = useMessageInfo(m, onServer, inviteCache, api.calendarInvite);
+  const [hover, setHover] = useState<string | null>(null);
+
   const send = async () => {
     if (!reply.trim() || sending) return;
     setSending(true);
@@ -270,6 +366,16 @@ function Letter(p: Props & { message: Message }) {
           )}
           <h2 className="reader-subject">{thread[0].subject.replace(/^((re|r|fwd?|i)\s*:\s*)+/i, "") || m.subject}</h2>
           <LabelChips labels={messageLabels} />
+          {unsubscribe && (
+            <div className="snooze-note">
+              <Icon name="ban" size={14} stroke={2} />
+              Fa parte di una lista di invio
+              <button type="button" className="link-btn" onClick={() => p.onUnsubscribe(m, unsubscribe)}>
+                Disiscriviti
+              </button>
+            </div>
+          )}
+          {invite && <InviteCard invite={invite} onRespond={(status) => p.onRespondInvite(m, status)} />}
           {snoozedUntil && (
             <div className="snooze-note">
               <Icon name="clock" size={14} stroke={2} />
@@ -303,11 +409,14 @@ function Letter(p: Props & { message: Message }) {
                 open={isOpen(x)}
                 collapsible={thread.length > 1}
                 onToggle={() => setToggled((t) => ({ ...t, [x.id]: !isOpen(x) }))}
+                onHoverLink={setHover}
               />
             </div>
           ))}
         </div>
       </div>
+
+      {hover && <div className="link-status" role="status">{hover}</div>}
 
       {m.folder !== "drafts" && !m.scheduled && (
         <form className="quick-reply" onSubmit={(e) => (e.preventDefault(), send())}>
@@ -338,10 +447,11 @@ interface ThreadMessageProps extends Props {
   open: boolean;
   collapsible: boolean;
   onToggle: () => void;
+  onHoverLink: (href: string | null) => void;
 }
 
 /** Un messaggio della conversazione: compatto (mittente e anteprima) oppure completo. */
-function ThreadMessage({ message: m, account: a, mine, open, collapsible, onToggle, onPreview, onLink, onMailto, remoteImages, trustedSenders, onTrustSender }: ThreadMessageProps) {
+function ThreadMessage({ message: m, account: a, mine, open, collapsible, onToggle, onPreview, onLink, onMailto, remoteImages, trustedSenders, onTrustSender, onHoverLink, onSaveAttachment, onSaveAll }: ThreadMessageProps) {
   const html = useHtml(m);
   const sender = m.fromEmail.toLowerCase();
   const [showOnce, setShowOnce] = useState(false);
@@ -392,7 +502,7 @@ function ThreadMessage({ message: m, account: a, mine, open, collapsible, onTogg
       )}
 
       {html ? (
-        <MailFrame html={html.html} remote={showRemote} onLink={onLink} onMailto={onMailto} />
+        <MailFrame html={html.html} remote={showRemote} onLink={onLink} onMailto={onMailto} onHover={onHoverLink} />
       ) : (
         <div className={html === undefined ? "body-text loading" : "body-text"}>
           {paragraphs(m.body).map((para, i) => (
@@ -404,11 +514,18 @@ function ThreadMessage({ message: m, account: a, mine, open, collapsible, onTogg
 
       {files.length > 0 && (
         <div className="attachments">
-          <span className="eyebrow">{plural(files.length, "allegato", "allegati")}</span>
+          <div className="attach-head">
+            <span className="eyebrow">{plural(files.length, "allegato", "allegati")}</span>
+            {!m.scheduled && !m.id.startsWith("local:") && files.length > 1 && (
+              <button type="button" className="link-btn" onClick={() => onSaveAll(m, files)}>
+                Salva tutti
+              </button>
+            )}
+          </div>
           <div className="attach-grid">
             {files.map((f) => (
+              <div key={f.index} className="attach-wrap">
               <button
-                key={f.index}
                 type="button"
                 className="attach"
                 disabled={!!m.scheduled || m.id.startsWith("local:")}
@@ -423,6 +540,12 @@ function ThreadMessage({ message: m, account: a, mine, open, collapsible, onTogg
                   </span>
                 </span>
               </button>
+              {!m.scheduled && !m.id.startsWith("local:") && (
+                <button type="button" className="icon-btn attach-save" aria-label={`Salva ${f.name} con nome`} title="Salva con nome" onClick={() => onSaveAttachment(m, f)}>
+                  <Icon name="download" size={15} stroke={1.9} />
+                </button>
+              )}
+              </div>
             ))}
           </div>
         </div>
@@ -436,7 +559,7 @@ const URL_RE = /\b(?:https?:\/\/|www\.)[^\s<>"]+/gi;
 const TRAILING_RE = /[.,;:!?'’)\]}»]+$/;
 
 /** Testo con gli indirizzi web cliccabili. */
-function LinkedText({ text, onLink }: { text: string; onLink: (url: string) => void }) {
+function LinkedText({ text, onLink }: { text: string; onLink: (url: string, text: string) => void }) {
   const parts: ReactNode[] = [];
   let pos = 0;
   for (const match of text.matchAll(URL_RE)) {
@@ -450,7 +573,7 @@ function LinkedText({ text, onLink }: { text: string; onLink: (url: string) => v
         title={href}
         onClick={(e) => {
           e.preventDefault();
-          onLink(href);
+          onLink(href, url);
         }}
       >
         {url}
@@ -469,7 +592,7 @@ const MOVE_FOLDERS: { id: Folder; label: string; icon: "inbox" | "archive" | "tr
 ];
 
 /** Messaggi selezionati: azioni di gruppo e riepilogo al posto del lettore. */
-function BulkPanel({ bulk, onBulkMove, onBulkFlags, onBulkClear, bulkBoxes, bulkMixed, onBulkMoveBox, bulkLabelIds, onBulkToggleLabel, onBulkCreateLabel, labels, menu, onMenu }: Props & { bulk: Message[] }) {
+function BulkPanel({ bulk, onBulkMove, onBulkFlags, onBulkClear, bulkBoxes, bulkMixed, onBulkMoveBox, bulkLabelIds, onBulkToggleLabel, onBulkCreateLabel, onBulkSpam, labels, menu, onMenu }: Props & { bulk: Message[] }) {
   const closeMenu = () => onMenu(null);
   const toggleMenu = (next: ReaderMenu) => onMenu(menu === next ? null : next);
   const allFlagged = bulk.every((m) => m.flagged);
@@ -505,6 +628,9 @@ function BulkPanel({ bulk, onBulkMove, onBulkFlags, onBulkClear, bulkBoxes, bulk
             onClick={() => onBulkFlags({ flagged: !allFlagged })}
           >
             <Icon name="star" size={17} stroke={1.7} fill={allFlagged ? "currentColor" : "none"} />
+          </button>
+          <button type="button" className="icon-btn lg" aria-label="Segnala come spam" title="Segnala come spam" onClick={onBulkSpam}>
+            <Icon name="ban" size={17} stroke={1.7} />
           </button>
           <span className="pop-anchor">
             <button type="button" className="icon-btn lg" aria-label="Sposta in una cartella" title="Sposta in…" aria-expanded={menu === "move"} onClick={() => toggleMenu("move")}>

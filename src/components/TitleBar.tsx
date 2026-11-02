@@ -36,7 +36,8 @@ export function TitleBar({ accountCount, query, onQuery, onSearchServer, searchR
           ref={searchRef}
           type="search"
           aria-label="Cerca in tutti gli account"
-          placeholder="Cerca in tutti gli account — persone, oggetti, testo"
+          placeholder="Cerca — anche da: oggetto: dopo: ha:allegati"
+          title="Filtri: da: a: oggetto: dopo: prima: ha:allegati stato:nonletti stato:contrassegnati. Invio cerca sul server."
           value={query}
           onChange={(e) => onQuery(e.target.value)}
           onKeyDown={(e) => {

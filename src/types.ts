@@ -6,6 +6,45 @@ export type Security = "tls" | "starttls";
 export type Folder = "inbox" | "drafts" | "sent" | "archive" | "trash" | "other";
 
 /** Cartella creata dall'utente sul server. */
+/** Firma alternativa di un account. */
+export interface Signature {
+  id: string;
+  name: string;
+  text: string;
+}
+
+/** Ricerca scomposta in parole e filtri, usata in locale e sul server. */
+export interface SearchQuery {
+  words: string[];
+  from: string[];
+  to: string[];
+  subject: string[];
+  /** AAAA-MM-GG */
+  after: string | null;
+  before: string | null;
+  unread: boolean;
+  flagged: boolean;
+  attachment: boolean;
+}
+
+/** Invito di calendario trovato in un messaggio. */
+export interface Invite {
+  summary: string;
+  start: number | null;
+  end: number | null;
+  allDay: boolean;
+  location: string | null;
+  organizer: string | null;
+  method: string;
+}
+
+/** Come disiscriversi da una lista (List-Unsubscribe). */
+export interface Unsubscribe {
+  oneClick: string | null;
+  url: string | null;
+  mailto: string | null;
+}
+
 /** Persona suggerita nei campi destinatario. */
 export interface Contact {
   name: string;
@@ -56,6 +95,7 @@ export interface Account {
   username: string;
   syncDays: number;
   signature: string;
+  signatures?: Signature[];
 }
 
 export interface Attachment {
@@ -135,6 +175,12 @@ export interface Outgoing {
   references?: string[];
   /** Message-ID scelto in anticipo: la copia locale e quella del server coincidono. */
   messageId?: string | null;
+  /** Messaggio citato: va dopo la firma, in testo e con la sua impaginazione. */
+  quote?: string | null;
+  quoteHtml?: string | null;
+  /** Firma scelta; senza vale quella dell'account. */
+  signature?: string | null;
+  signatureHtml?: string | null;
 }
 
 /** Messaggio in coda per "Invia più tardi". */
@@ -153,6 +199,7 @@ export interface AccountPatch {
   displayName?: string;
   color?: string;
   signature?: string;
+  signatures?: Signature[];
 }
 
 /** Bozza con cui si apre la finestra Scrivi. */
@@ -166,6 +213,9 @@ export interface Draft {
   attachments?: string[];
   inReplyTo: string | null;
   references?: string[];
+  /** Messaggio citato, fuori dal testo modificabile. */
+  quote?: string | null;
+  quoteHtml?: string | null;
   /** Message-ID della bozza salvata sul server che si sta riprendendo. */
   draftId?: string | null;
   /** Id del messaggio programmato che questa bozza sostituisce. */
