@@ -13,7 +13,6 @@
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "notification:default",
-    "opener:default",
     "dialog:allow-open"
   ]
 }

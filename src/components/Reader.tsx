@@ -1,14 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { fileSize, initials, longTime, monoOf, paragraphs, plural, providerLabel } from "../format";
 import { Icon } from "../icons";
 import type { Label } from "../store";
-import type { Account, HtmlView, Message, Scheduled } from "../types";
+import type { Account, Folder, HtmlView, Mailbox, Message, Scheduled } from "../types";
 import { MailFrame } from "./MailFrame";
 import { LabelChips, LabelPicker, Popover, WhenPicker } from "./Pickers";
 import { isImage, Thumb } from "./Preview";
 
-export type ReaderMenu = "snooze" | "label" | null;
+export type ReaderMenu = "snooze" | "label" | "move" | null;
 
 interface Props {
   message: Message | null;
@@ -16,12 +16,14 @@ interface Props {
   onArchive: (m: Message) => void;
   onDelete: (m: Message) => void;
   onToggleStar: (m: Message) => void;
-  onMarkUnread: (m: Message) => void;
+  onToggleRead: (m: Message) => void;
   onReply: (m: Message, all: boolean) => void;
   onForward: (m: Message) => void;
   onQuickReply: (m: Message, text: string) => Promise<boolean>;
   /** Apre il visore sull'allegato `index`. */
   onPreview: (m: Message, index: number) => void;
+  /** Clic su un link http(s) nel testo del messaggio. */
+  onLink: (url: string) => void;
   onMailto: (address: string) => void;
   /** Preferenza: carica subito immagini e stili remoti. */
   remoteImages: boolean;
@@ -32,7 +34,16 @@ interface Props {
   onTrustSender: (email: string) => void;
   /** Selezione multipla: con almeno due messaggi il lettore mostra il riepilogo e le azioni di gruppo. */
   bulk: Message[] | null;
-  onBulkMove: (to: "archive" | "trash") => void;
+  onBulkMove: (to: Folder) => void;
+  /** Cartelle dell'utente in cui spostare (solo se i selezionati sono di un account). */
+  bulkBoxes: Mailbox[];
+  /** I selezionati appartengono a più account. */
+  bulkMixed: boolean;
+  onBulkMoveBox: (mailbox: Mailbox) => void;
+  /** Etichette presenti su tutti i selezionati. */
+  bulkLabelIds: string[];
+  onBulkToggleLabel: (id: string) => void;
+  onBulkCreateLabel: (name: string) => void;
   onBulkFlags: (flags: { seen?: boolean; flagged?: boolean }) => void;
   onBulkClear: () => void;
   menu: ReaderMenu;
@@ -68,8 +79,15 @@ export function Reader(p: Props) {
             <button type="button" className="icon-btn lg" aria-label="Sposta nel cestino" title="Sposta nel cestino" disabled={!canMove} onClick={() => m && p.onDelete(m)}>
               <Icon name="trash" size={17} stroke={1.7} />
             </button>
-            <button type="button" className="icon-btn lg" aria-label="Segna come non letto" title="Segna come non letto" disabled={!m || m.unread} onClick={() => m && p.onMarkUnread(m)}>
-              <Icon name="markUnread" size={17} stroke={1.7} />
+            <button
+              type="button"
+              className="icon-btn lg"
+              aria-label={m?.unread ? "Segna come letto" : "Segna come da leggere"}
+              title={m?.unread ? "Segna come letto" : "Segna come da leggere (U)"}
+              disabled={!m}
+              onClick={() => m && p.onToggleRead(m)}
+            >
+              <Icon name={m?.unread ? "mail" : "markUnread"} size={17} stroke={1.7} />
             </button>
             <span className="divider" />
             <button
@@ -316,7 +334,7 @@ interface ThreadMessageProps extends Props {
 }
 
 /** Un messaggio della conversazione: compatto (mittente e anteprima) oppure completo. */
-function ThreadMessage({ message: m, account: a, mine, open, collapsible, onToggle, onPreview, onMailto, remoteImages, trustedSenders, onTrustSender }: ThreadMessageProps) {
+function ThreadMessage({ message: m, account: a, mine, open, collapsible, onToggle, onPreview, onLink, onMailto, remoteImages, trustedSenders, onTrustSender }: ThreadMessageProps) {
   const html = useHtml(m);
   const sender = m.fromEmail.toLowerCase();
   const [showOnce, setShowOnce] = useState(false);
@@ -367,11 +385,11 @@ function ThreadMessage({ message: m, account: a, mine, open, collapsible, onTogg
       )}
 
       {html ? (
-        <MailFrame html={html.html} remote={showRemote} onMailto={onMailto} />
+        <MailFrame html={html.html} remote={showRemote} onLink={onLink} onMailto={onMailto} />
       ) : (
         <div className={html === undefined ? "body-text loading" : "body-text"}>
           {paragraphs(m.body).map((para, i) => (
-            <p key={i}>{para}</p>
+            <p key={i}><LinkedText text={para} onLink={onLink} /></p>
           ))}
           {!m.body.trim() && <p className="paper-muted">(Messaggio senza testo)</p>}
         </div>
@@ -406,8 +424,47 @@ function ThreadMessage({ message: m, account: a, mine, open, collapsible, onTogg
   );
 }
 
-/** Più messaggi selezionati: azioni di gruppo e riepilogo al posto del lettore. */
-function BulkPanel({ bulk, onBulkMove, onBulkFlags, onBulkClear }: Props & { bulk: Message[] }) {
+/** Indirizzi web nel testo semplice, senza la punteggiatura che li segue nella frase. */
+const URL_RE = /\b(?:https?:\/\/|www\.)[^\s<>"]+/gi;
+const TRAILING_RE = /[.,;:!?'’)\]}»]+$/;
+
+/** Testo con gli indirizzi web cliccabili. */
+function LinkedText({ text, onLink }: { text: string; onLink: (url: string) => void }) {
+  const parts: ReactNode[] = [];
+  let pos = 0;
+  for (const match of text.matchAll(URL_RE)) {
+    const url = match[0].replace(TRAILING_RE, "");
+    const href = /^www\./i.test(url) ? `https://${url}` : url;
+    parts.push(
+      text.slice(pos, match.index),
+      <a
+        key={match.index}
+        href={href}
+        title={href}
+        onClick={(e) => {
+          e.preventDefault();
+          onLink(href);
+        }}
+      >
+        {url}
+      </a>,
+    );
+    pos = match.index + url.length;
+  }
+  parts.push(text.slice(pos));
+  return <>{parts}</>;
+}
+
+const MOVE_FOLDERS: { id: Folder; label: string; icon: "inbox" | "archive" | "trash" }[] = [
+  { id: "inbox", label: "Posta in arrivo", icon: "inbox" },
+  { id: "archive", label: "Archivio", icon: "archive" },
+  { id: "trash", label: "Cestino", icon: "trash" },
+];
+
+/** Messaggi selezionati: azioni di gruppo e riepilogo al posto del lettore. */
+function BulkPanel({ bulk, onBulkMove, onBulkFlags, onBulkClear, bulkBoxes, bulkMixed, onBulkMoveBox, bulkLabelIds, onBulkToggleLabel, onBulkCreateLabel, labels, menu, onMenu }: Props & { bulk: Message[] }) {
+  const closeMenu = () => onMenu(null);
+  const toggleMenu = (next: ReaderMenu) => onMenu(menu === next ? null : next);
   const allFlagged = bulk.every((m) => m.flagged);
   const anyUnread = bulk.some((m) => m.unread);
   const shown = bulk.slice(0, 8);
@@ -441,6 +498,61 @@ function BulkPanel({ bulk, onBulkMove, onBulkFlags, onBulkClear }: Props & { bul
           >
             <Icon name="star" size={17} stroke={1.7} fill={allFlagged ? "currentColor" : "none"} />
           </button>
+          <span className="pop-anchor">
+            <button type="button" className="icon-btn lg" aria-label="Sposta in una cartella" title="Sposta in…" aria-expanded={menu === "move"} onClick={() => toggleMenu("move")}>
+              <Icon name="folder" size={17} stroke={1.7} />
+            </button>
+            {menu === "move" && (
+              <Popover label="Sposta in" onClose={closeMenu}>
+                <div className="pop-title">Sposta in</div>
+                <div className="pop-scroll scroll">
+                  {MOVE_FOLDERS.map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      className="pop-item"
+                      onClick={() => {
+                        closeMenu();
+                        onBulkMove(f.id);
+                      }}
+                    >
+                      <span className="label-name">
+                        <Icon name={f.icon} size={15} stroke={1.8} />
+                        {f.label}
+                      </span>
+                    </button>
+                  ))}
+                  {bulkBoxes.map((b) => (
+                    <button
+                      key={b.path}
+                      type="button"
+                      className="pop-item"
+                      onClick={() => {
+                        closeMenu();
+                        onBulkMoveBox(b);
+                      }}
+                    >
+                      <span className="label-name">
+                        <Icon name="folder" size={15} stroke={1.8} />
+                        {b.label}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                {bulkMixed && <div className="pop-empty">Le altre cartelle compaiono selezionando messaggi di un solo account.</div>}
+              </Popover>
+            )}
+          </span>
+          <span className="pop-anchor">
+            <button type="button" className="icon-btn lg" aria-label="Etichetta i selezionati" title="Etichetta" aria-expanded={menu === "label"} onClick={() => toggleMenu("label")}>
+              <Icon name="tag" size={17} stroke={1.7} />
+            </button>
+            {menu === "label" && (
+              <Popover label="Etichetta" onClose={closeMenu}>
+                <LabelPicker labels={labels} selected={bulkLabelIds} onToggle={onBulkToggleLabel} onCreate={onBulkCreateLabel} />
+              </Popover>
+            )}
+          </span>
         </div>
         <div className="toolbar-group end">
           <button type="button" className="btn btn-soft btn-sm" onClick={onBulkClear}>
@@ -451,7 +563,7 @@ function BulkPanel({ bulk, onBulkMove, onBulkFlags, onBulkClear }: Props & { bul
       <article className="paper scroll">
         <div className="paper-inner bulk">
           <div className="bulk-count">{bulk.length}</div>
-          <h2 className="reader-subject">messaggi selezionati</h2>
+          <h2 className="reader-subject">{bulk.length === 1 ? "messaggio selezionato" : "messaggi selezionati"}</h2>
           <ul className="bulk-list">
             {shown.map((m) => (
               <li key={m.id}>

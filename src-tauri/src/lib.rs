@@ -1,5 +1,6 @@
 mod accounts;
 mod autoconfig;
+mod browsers;
 mod error;
 mod imap_client;
 mod mail;
@@ -351,6 +352,42 @@ async fn move_messages(targets: Vec<MessageRef>, to: Folder) -> Result<()> {
     Ok(())
 }
 
+/// Sposta messaggi di un solo account in una sua cartella.
+#[tauri::command]
+async fn move_to_mailbox(targets: Vec<MessageRef>, mailbox: String) -> Result<()> {
+    if targets.windows(2).any(|t| t[0].account_id != t[1].account_id) {
+        return Err(msg("Si può spostare in una cartella solo da un account alla volta"));
+    }
+    for (target, uids) in by_mailbox(targets) {
+        let acc = accounts::get(&target.account_id)?;
+        let auth = auth_for(&acc).await?;
+        let dest = mailbox.clone();
+        blocking(move || {
+            imap_client::move_to_mailbox(&acc, &auth, &target.mailbox, &uids, &dest)?;
+            mail::update_cache(&acc.id, &target.bucket(), |msgs| msgs.retain(|m| !uids.contains(&m.uid)))
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// Apre un link nel browser predefinito; se fallisce il frontend propone `list_browsers`.
+#[tauri::command]
+async fn open_link(url: String) -> Result<()> {
+    let url = browsers::checked_url(&url)?;
+    blocking(move || browsers::open_default(&url)).await
+}
+
+#[tauri::command]
+fn list_browsers() -> Vec<browsers::Browser> {
+    browsers::list()
+}
+
+#[tauri::command]
+fn open_link_with(browser: String, url: String) -> Result<()> {
+    browsers::open_with(&browser, &browsers::checked_url(&url)?)
+}
+
 async fn deliver(outgoing: smtp::Outgoing) -> Result<()> {
     if outgoing.to.is_empty() {
         return Err(msg("Aggiungi almeno un destinatario"));
@@ -606,6 +643,10 @@ pub fn run() {
             set_flags,
             move_message,
             move_messages,
+            move_to_mailbox,
+            open_link,
+            list_browsers,
+            open_link_with,
             set_flags_many,
             send_message,
             schedule_message,

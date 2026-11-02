@@ -2,9 +2,8 @@
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { demo } from "./demo";
-import type { Account, AccountPatch, Folder, Guess, HtmlView, Mailbox, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
+import type { Account, AccountPatch, Browser, Folder, Guess, HtmlView, Mailbox, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
 
 export const inTauri = isTauri();
 
@@ -55,6 +54,10 @@ export const api = {
   moveMessages: (ms: Message[], to: Folder): Promise<void> =>
     inTauri ? invoke("move_messages", { targets: ms.map(ref), to }) : Promise.all(ms.map((m) => demo.move(m, to))).then(() => {}),
 
+  /** Sposta messaggi di un solo account in una sua cartella. */
+  moveToMailbox: (ms: Message[], mailbox: string): Promise<void> =>
+    inTauri ? invoke("move_to_mailbox", { targets: ms.map(ref), mailbox }) : Promise.all(ms.map((m) => demo.move(m, "other"))).then(() => {}),
+
   moveMessage: (m: Message, to: Folder): Promise<void> => (inTauri ? invoke("move_message", { target: ref(m), to }) : demo.move(m, to)),
 
   sendMessage: (outgoing: Outgoing): Promise<void> => (inTauri ? invoke("send_message", { outgoing }) : demo.send(outgoing)),
@@ -80,8 +83,13 @@ export const api = {
   attachmentBytes: (m: Message, index: number): Promise<ArrayBuffer> =>
     inTauri ? invoke("attachment_bytes", { target: ref(m), index }) : demo.attachmentBytes(m, index),
 
-  /** Link http(s) nel browser di sistema. */
-  openLink: (url: string): Promise<void> => (inTauri ? openUrl(url) : (window.open(url, "_blank", "noopener"), Promise.resolve())),
+  /** Link http(s) nel browser predefinito; fallisce se il sistema non riesce ad aprirlo. */
+  openLink: (url: string): Promise<void> => (inTauri ? invoke("open_link", { url }) : (window.open(url, "_blank", "noopener"), Promise.resolve())),
+
+  /** Browser installati, da proporre se quello predefinito non funziona. */
+  listBrowsers: (): Promise<Browser[]> => (inTauri ? invoke("list_browsers") : Promise.resolve([])),
+
+  openLinkWith: (browser: string, url: string): Promise<void> => (inTauri ? invoke("open_link_with", { browser, url }) : Promise.resolve()),
 
   clearCache: (): Promise<void> => (inTauri ? invoke("clear_cache") : Promise.resolve()),
 

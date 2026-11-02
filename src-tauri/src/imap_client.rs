@@ -239,22 +239,28 @@ pub fn set_flag(acc: &Account, auth: &Auth, mailbox: &str, uids: &[u32], flag: &
     Ok(())
 }
 
-/// Sposta uno o più messaggi della stessa casella in Archivio o Cestino, in una sola sessione.
+/// Trasferisce i messaggi della casella selezionata, con MOVE se il server lo supporta.
+fn transfer(s: &mut Session, uid: &str, dest: &str) -> Result<()> {
+    if s.capabilities()?.has_str("MOVE") {
+        s.uid_mv(uid, dest)?;
+    } else {
+        s.uid_copy(uid, dest)?;
+        s.uid_store(uid, "+FLAGS.SILENT (\\Deleted)")?;
+        s.expunge()?;
+    }
+    Ok(())
+}
+
+/// Sposta uno o più messaggi della stessa casella in una cartella speciale, in una sola sessione.
 pub fn move_to(acc: &Account, auth: &Auth, mailbox: &str, uids: &[u32], target: Folder) -> Result<()> {
     let mut s = connect(acc, auth)?;
     let dest = resolve(&mut s, target)?;
     s.select(mailbox)?;
     let uid = uid_set(uids);
     match dest {
-        Some(dest) if dest != mailbox => {
-            if s.capabilities()?.has_str("MOVE") {
-                s.uid_mv(&uid, &dest)?;
-            } else {
-                s.uid_copy(&uid, &dest)?;
-                s.uid_store(&uid, "+FLAGS.SILENT (\\Deleted)")?;
-                s.expunge()?;
-            }
-        }
+        Some(dest) if dest != mailbox => transfer(&mut s, &uid, &dest)?,
+        // Già in posta in arrivo: non c'è niente da fare (e il ramo finale cancellerebbe).
+        _ if target == Folder::Inbox => {}
         // Gmail senza cartella Archivio esposta: togliere dalla posta in arrivo equivale ad archiviare.
         None if target == Folder::Archive && acc.provider != Provider::Google => {
             let _ = s.logout();
@@ -265,6 +271,18 @@ pub fn move_to(acc: &Account, auth: &Auth, mailbox: &str, uids: &[u32], target: 
             s.expunge()?;
         }
     }
+    let _ = s.logout();
+    Ok(())
+}
+
+/// Sposta uno o più messaggi in una cartella dell'utente dello stesso account.
+pub fn move_to_mailbox(acc: &Account, auth: &Auth, mailbox: &str, uids: &[u32], dest: &str) -> Result<()> {
+    if mailbox == dest {
+        return Ok(());
+    }
+    let mut s = connect(acc, auth)?;
+    s.select(mailbox)?;
+    transfer(&mut s, &uid_set(uids), dest)?;
     let _ = s.logout();
     Ok(())
 }
