@@ -37,6 +37,9 @@ interface Props {
   onRenameAccount: (a: Account, name: string) => void;
   onResyncAccount: (a: Account) => void;
   onReorderAccounts: (ids: string[]) => void;
+  onCreateBox: (accountId: string, parent: Mailbox | null) => void;
+  onRenameBox: (accountId: string, box: Mailbox) => void;
+  onDeleteBox: (accountId: string, box: Mailbox) => void;
   labels: Label[];
   labelCounts: Record<string, number>;
   labelFilter: string | null;
@@ -45,6 +48,9 @@ interface Props {
   onAddAccount: () => void;
   onSettings: () => void;
 }
+
+/** Cartelle speciali su cui si può lasciare un messaggio trascinato. */
+const DROPPABLE: Folder[] = ["inbox", "archive", "trash"];
 
 const show = (n: number | undefined) => (n ? String(n) : "");
 
@@ -131,6 +137,7 @@ export function Sidebar(p: Props) {
                     key={v.id}
                     type="button"
                     className="nav-item tree-item"
+                    data-drop-folder={DROPPABLE.includes(v.id as Folder) ? v.id : undefined}
                     aria-current={!p.box && p.accountFilter === "all" && p.view === v.id}
                     onClick={() => p.onView(v.id)}
                   >
@@ -324,6 +331,10 @@ function AccountList(p: Props & { branches: Branches }) {
                   <span>Rinomina</span>
                   <span className="pop-hint">F2</span>
                 </button>
+                <button type="button" className="pop-item" onClick={() => (close(), p.onCreateBox(a.id, null))}>
+                  <span>Nuova cartella</span>
+                  <Icon name="folder" size={15} stroke={1.8} />
+                </button>
                 <button type="button" className="pop-item" disabled={busy} onClick={() => (close(), p.onResyncAccount(a))}>
                   <span>Risincronizza</span>
                   <Icon name="sync" size={15} stroke={1.8} />
@@ -415,6 +426,7 @@ function buildTree(list: Mailbox[]): FolderNode[] {
 /** Cartelle del server di un account: speciali e personali insieme, con le sottocartelle. */
 function FolderTree(p: Props & { branches: Branches; account: Account }) {
   const a = p.account;
+  const [menuFor, setMenuFor] = useState<string | null>(null);
   const list = p.mailboxes[a.id];
   if (!list) return <span className="tree-note">Carico le cartelle…</span>;
   if (list.length === 0) return <span className="tree-note">Nessuna cartella</span>;
@@ -438,8 +450,33 @@ function FolderTree(p: Props & { branches: Branches; account: Account }) {
       return (
         <div key={m.path} className="tree-node">
           <div className="tree-line" style={{ paddingLeft: depth * 14 }}>
+            {menuFor === m.path && (
+              <Popover label={`Azioni per ${m.name}`} onClose={() => setMenuFor(null)} placement={["end"]}>
+                <button type="button" className="pop-item" onClick={() => (setMenuFor(null), p.onCreateBox(a.id, m))}>
+                  <span>Nuova sottocartella</span>
+                </button>
+                {!m.special && m.selectable && (
+                  <>
+                    <button type="button" className="pop-item" onClick={() => (setMenuFor(null), p.onRenameBox(a.id, m))}>
+                      <span>Rinomina</span>
+                    </button>
+                    <button type="button" className="pop-item" onClick={() => (setMenuFor(null), p.onDeleteBox(a.id, m))}>
+                      <span>Elimina</span>
+                    </button>
+                  </>
+                )}
+              </Popover>
+            )}
             {n.children.length > 0 ? <Chevron open={open} label={m.name} onToggle={() => p.branches.toggle(id)} /> : <span className="tree-toggle" />}
-            <button type="button" className={m.selectable ? "nav-item tree-item" : "nav-item tree-item container"} aria-current={current} title={m.label} onClick={select}>
+            <button type="button" className={m.selectable ? "nav-item tree-item" : "nav-item tree-item container"} aria-current={current} title={m.label} onClick={select}
+              data-drop-account={a.id}
+              data-drop-folder={m.special && DROPPABLE.includes(m.special) ? m.special : undefined}
+              data-drop-path={!m.special && m.selectable ? m.path : undefined}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setMenuFor(m.path);
+              }}
+            >
               <Icon name={special?.icon ?? "folder"} size={16} stroke={1.7} />
               <span className="label">{special?.label ?? m.name}</span>
               <span className="count">{show(unread)}</span>

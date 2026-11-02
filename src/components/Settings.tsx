@@ -1,19 +1,21 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, errorText, inTauri } from "../api";
 import { monoOf, plural } from "../format";
 import { Icon, type IconName } from "../icons";
 import { notificationsAllowed, notifyTest } from "../notify";
 import { SHORTCUTS } from "../shortcuts";
-import { LABEL_COLORS, type Labels } from "../store";
+import { LABEL_COLORS, type Labels, type Rule } from "../store";
 import { PRESETS, accentOf, inkFor, isHex, type Density, type Prefs, type Reader } from "../prefs";
-import type { Account, AccountPatch } from "../types";
+import type { Account, AccountPatch, Mailbox } from "../types";
 import { CloseButton, Modal } from "./Modal";
 
-export type Section = "accounts" | "look" | "labels" | "notifications" | "tray" | "shortcuts" | "privacy";
+export type Section = "accounts" | "look" | "mail" | "rules" | "labels" | "notifications" | "tray" | "shortcuts" | "privacy";
 
 const SECTIONS: { id: Section; label: string; icon: IconName }[] = [
   { id: "accounts", label: "Account", icon: "user" },
   { id: "look", label: "Aspetto", icon: "palette" },
+  { id: "mail", label: "Invio e posta", icon: "send" },
+  { id: "rules", label: "Regole", icon: "filter" },
   { id: "labels", label: "Etichette", icon: "tag" },
   { id: "notifications", label: "Notifiche", icon: "bell" },
   { id: "tray", label: "Area di notifica", icon: "tray" },
@@ -34,6 +36,11 @@ interface Props {
   trayAvailable: boolean;
   labels: Labels;
   onLabels: (l: Labels) => void;
+  rules: Rule[];
+  onRules: (r: Rule[]) => void;
+  /** Regola da completare, proposta dal menu di un messaggio. */
+  ruleDraft?: Partial<Rule>;
+  mailboxes: Record<string, Mailbox[]>;
   onClearCache: () => Promise<void>;
   onClose: () => void;
 }
@@ -58,6 +65,8 @@ export function Settings(p: Props) {
         <section className="settings-main scroll">
           {section === "accounts" && <Accounts {...p} />}
           {section === "look" && <Look prefs={p.prefs} onPrefs={p.onPrefs} />}
+          {section === "mail" && <MailSection prefs={p.prefs} onPrefs={p.onPrefs} />}
+          {section === "rules" && <RulesSection rules={p.rules} onRules={p.onRules} labels={p.labels} accounts={p.accounts} mailboxes={p.mailboxes} draft={p.ruleDraft} />}
           {section === "labels" && <LabelsSection labels={p.labels} onLabels={p.onLabels} />}
           {section === "notifications" && <Notifications prefs={p.prefs} onPrefs={p.onPrefs} />}
           {section === "tray" && <Tray prefs={p.prefs} onPrefs={p.onPrefs} available={p.trayAvailable} />}
@@ -269,6 +278,7 @@ function AccountCard({ account: a, onChanged, onRemoved }: { account: Account; o
         <span>Firma</span>
         <textarea className="input" rows={2} value={signature} onChange={(e) => setSignature(e.target.value)} onBlur={() => signature !== a.signature && save({ signature })} />
       </label>
+      <Signatures account={a} onSave={(signatures) => save({ signatures })} />
       {error && <div className="status error" role="alert"><span>{error}</span></div>}
       <div className="acct-card-foot">
         <div role="radiogroup" aria-label={`Colore di ${a.name}`} className="color-dots">
@@ -288,6 +298,39 @@ function AccountCard({ account: a, onChanged, onRemoved }: { account: Account; o
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Firme alternative di un account, tra cui scegliere nella finestra Scrivi. */
+function Signatures({ account, onSave }: { account: Account; onSave: (list: NonNullable<Account["signatures"]>) => void }) {
+  const list = account.signatures ?? [];
+  return (
+    <div className="stack-10">
+      {list.map((x) => (
+        <div key={x.id} className="signature-edit">
+          <input
+            className="input"
+            aria-label="Nome della firma"
+            defaultValue={x.name}
+            onBlur={(e) => e.target.value.trim() && e.target.value !== x.name && onSave(list.map((y) => (y.id === x.id ? { ...y, name: e.target.value.trim() } : y)))}
+          />
+          <textarea
+            className="input"
+            rows={2}
+            aria-label={`Testo della firma ${x.name}`}
+            defaultValue={x.text}
+            onBlur={(e) => e.target.value !== x.text && onSave(list.map((y) => (y.id === x.id ? { ...y, text: e.target.value } : y)))}
+          />
+          <button type="button" className="icon-btn" aria-label={`Elimina la firma ${x.name}`} title="Elimina" onClick={() => onSave(list.filter((y) => y.id !== x.id))}>
+            <Icon name="trash" size={15} stroke={1.8} />
+          </button>
+        </div>
+      ))}
+      <button type="button" className="btn btn-soft btn-sm" style={{ alignSelf: "flex-start" }} onClick={() => onSave([...list, { id: crypto.randomUUID(), name: `Firma ${list.length + 2}`, text: "" }])}>
+        <Icon name="plus" size={14} stroke={2} />
+        Aggiungi un'altra firma
+      </button>
     </div>
   );
 }
@@ -469,7 +512,7 @@ function LabelsSection({ labels, onLabels }: { labels: Labels; onLabels: (l: Lab
     });
   return (
     <>
-      <Head title="Etichette" text="Le etichette restano su questo computer e valgono per tutti gli account. Si applicano dal pannello di lettura con L." />
+      <Head title="Etichette" text="Valgono per tutti gli account e si applicano dal pannello di lettura con L. Sugli account Gmail si sincronizzano con le etichette omonime; sugli altri restano su questo computer." />
       {labels.defs.length === 0 ? (
         <p className="setting-desc">Nessuna etichetta. Apri un messaggio e usa il pulsante Etichetta per crearne una.</p>
       ) : (
@@ -503,6 +546,173 @@ function LabelsSection({ labels, onLabels }: { labels: Labels; onLabels: (l: Lab
           })}
         </div>
       )}
+    </>
+  );
+}
+
+function MailSection({ prefs, onPrefs }: PrefsProps) {
+  const [isDefault, setIsDefault] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    api.isDefaultMailClient().then(setIsDefault, () => setIsDefault(false));
+  }, []);
+  const makeDefault = async () => {
+    try {
+      setError(null);
+      await api.setDefaultMailClient();
+      setIsDefault(await api.isDefaultMailClient());
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+  return (
+    <>
+      <Head title="Invio e posta" text="Come partono i messaggi e chi apre i link alle email." />
+      <Segmented<string>
+        label="Tempo per annullare un invio"
+        options={[
+          { id: "0", label: "Subito" },
+          { id: "6", label: "6 secondi" },
+          { id: "10", label: "10 secondi" },
+          { id: "30", label: "30 secondi" },
+        ]}
+        value={String(prefs.sendDelay)}
+        onChange={(v) => onPrefs({ ...prefs, sendDelay: Number(v) })}
+      />
+      <div className="stack-10">
+        <span className="setting-title">Client di posta predefinito</span>
+        <span className="setting-desc">I link alle email (mailto:) del browser e delle altre app aprono la finestra Scrivi di Missiva.</span>
+        <div className="foot-actions">
+          {isDefault ? (
+            <span className="setting-desc" role="status">Missiva è il client predefinito.</span>
+          ) : (
+            <button type="button" className="btn btn-soft btn-sm" onClick={makeDefault} disabled={!inTauri}>
+              <Icon name="mail" size={14} />
+              Usa Missiva come predefinito
+            </button>
+          )}
+          {error && <span className="setting-desc" role="alert">{error}</span>}
+        </div>
+      </div>
+    </>
+  );
+}
+
+const RULE_FIELDS: { id: Rule["field"]; label: string }[] = [
+  { id: "from", label: "Il mittente" },
+  { id: "to", label: "Il destinatario" },
+  { id: "subject", label: "L'oggetto" },
+];
+
+const RULE_ACTIONS: { id: Rule["action"]; label: string }[] = [
+  { id: "read", label: "Segna come letto" },
+  { id: "star", label: "Contrassegna" },
+  { id: "label", label: "Applica un'etichetta" },
+  { id: "archive", label: "Archivia" },
+  { id: "move", label: "Sposta in una cartella" },
+  { id: "spam", label: "Segnala come spam" },
+  { id: "trash", label: "Sposta nel cestino" },
+];
+
+function ruleText(r: Rule, labels: Labels, accounts: Account[]) {
+  const field = RULE_FIELDS.find((f) => f.id === r.field)?.label ?? "";
+  const action = r.action === "label" ? `applica «${labels.defs.find((l) => l.id === r.labelId)?.name ?? "?"}»` : r.action === "move" ? `sposta in «${r.boxLabel}»` : RULE_ACTIONS.find((a) => a.id === r.action)?.label.toLowerCase();
+  const scope = r.accountId ? ` · solo ${accounts.find((a) => a.id === r.accountId)?.name ?? "?"}` : "";
+  return `${field} contiene «${r.contains}»: ${action}${scope}`;
+}
+
+function RulesSection({ rules, onRules, labels, accounts, mailboxes, draft }: { rules: Rule[]; onRules: (r: Rule[]) => void; labels: Labels; accounts: Account[]; mailboxes: Record<string, Mailbox[]>; draft?: Partial<Rule> }) {
+  const [field, setField] = useState<Rule["field"]>(draft?.field ?? "from");
+  const [contains, setContains] = useState(draft?.contains ?? "");
+  const [action, setAction] = useState<Rule["action"]>("archive");
+  const [accountId, setAccountId] = useState(draft?.accountId ?? "");
+  const [labelId, setLabelId] = useState("");
+  const [boxPath, setBoxPath] = useState("");
+  const boxes = (mailboxes[accountId] ?? []).filter((b) => b.selectable && !b.special);
+  const incomplete = !contains.trim() || (action === "label" && !labelId) || (action === "move" && (!accountId || !boxPath));
+  const add = () => {
+    const box = boxes.find((b) => b.path === boxPath);
+    onRules([
+      ...rules,
+      {
+        id: crypto.randomUUID(),
+        field,
+        contains: contains.trim(),
+        action,
+        accountId: accountId || null,
+        ...(action === "label" ? { labelId } : {}),
+        ...(action === "move" && box ? { boxPath: box.path, boxLabel: box.label } : {}),
+      },
+    ]);
+    setContains("");
+  };
+  return (
+    <>
+      <Head title="Regole" text="Valgono per i nuovi messaggi in arrivo mentre Missiva è aperta, anche solo nell'area di notifica. I messaggi già arrivati non cambiano." />
+      {rules.length > 0 && (
+        <div className="settings-list">
+          {rules.map((r) => (
+            <div key={r.id} className="setting-row">
+              <span className="setting-text">{ruleText(r, labels, accounts)}</span>
+              <button type="button" className="icon-btn" aria-label="Elimina la regola" title="Elimina" onClick={() => onRules(rules.filter((x) => x.id !== r.id))}>
+                <Icon name="trash" size={15} stroke={1.8} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <form className="rule-form" onSubmit={(e) => (e.preventDefault(), !incomplete && add())}>
+        <span className="setting-title">Nuova regola</span>
+        <div className="grid-2">
+          <label className="field">
+            <span>Se</span>
+            <select className="input" value={field} onChange={(e) => setField(e.target.value as Rule["field"])}>
+              {RULE_FIELDS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+            </select>
+          </label>
+          <label className="field">
+            <span>Contiene</span>
+            <input className="input" value={contains} placeholder="es. newsletter@sito.it" onChange={(e) => setContains(e.target.value)} />
+          </label>
+          <label className="field">
+            <span>Allora</span>
+            <select className="input" value={action} onChange={(e) => setAction(e.target.value as Rule["action"])}>
+              {RULE_ACTIONS.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+            </select>
+          </label>
+          <label className="field">
+            <span>Su quale account</span>
+            <select className="input" value={accountId} onChange={(e) => (setAccountId(e.target.value), setBoxPath(""))}>
+              <option value="">Tutti</option>
+              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </label>
+          {action === "label" && (
+            <label className="field">
+              <span>Etichetta</span>
+              <select className="input" value={labelId} onChange={(e) => setLabelId(e.target.value)}>
+                <option value="">Scegli…</option>
+                {labels.defs.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+              </select>
+            </label>
+          )}
+          {action === "move" && (
+            <label className="field">
+              <span>Cartella{accountId ? "" : " (scegli prima un account)"}</span>
+              <select className="input" value={boxPath} disabled={!accountId} onChange={(e) => setBoxPath(e.target.value)}>
+                <option value="">Scegli…</option>
+                {boxes.map((b) => <option key={b.path} value={b.path}>{b.label}</option>)}
+              </select>
+            </label>
+          )}
+        </div>
+        <div>
+          <button type="submit" className="btn btn-soft btn-sm" disabled={incomplete}>
+            <Icon name="plus" size={14} stroke={2} />
+            Aggiungi regola
+          </button>
+        </div>
+      </form>
     </>
   );
 }

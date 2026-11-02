@@ -46,6 +46,9 @@ const PATHS = {
   folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
   arrowUp: "M12 19V5 M6 11l6-6 6 6",
   arrowDown: "M12 5v14 M6 13l6 6 6-6",
+  download: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3",
+  print: "M6 9V2h12v7 M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2 M6 14h12v8H6z",
+  ban: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M4.93 4.93l14.14 14.14",
   markUnread: "M22 6v12H2V6 M22 6l-10 7L2 6 M19 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
 } as const;
 

@@ -8,6 +8,8 @@ interface Props {
   accountCount: number;
   query: string;
   onQuery: (q: string) => void;
+  /** Invio nel campo di ricerca: cerca sul server. */
+  onSearchServer: () => void;
   searchRef: RefObject<HTMLInputElement | null>;
   syncing: boolean;
   syncLabel: string;
@@ -18,7 +20,7 @@ interface Props {
 const win = () => (inTauri ? getCurrentWindow() : null);
 
 /** Barra del titolo disegnata dall'app (CSD): trascinabile, con ricerca e controlli finestra. */
-export function TitleBar({ accountCount, query, onQuery, searchRef, syncing, syncLabel, syncError, onSync }: Props) {
+export function TitleBar({ accountCount, query, onQuery, onSearchServer, searchRef, syncing, syncLabel, syncError, onSync }: Props) {
   return (
     <header className="titlebar" data-tauri-drag-region>
       <div className="titlebar-side" data-tauri-drag-region>
@@ -34,10 +36,18 @@ export function TitleBar({ accountCount, query, onQuery, searchRef, syncing, syn
           ref={searchRef}
           type="search"
           aria-label="Cerca in tutti gli account"
-          placeholder="Cerca in tutti gli account — persone, oggetti, testo"
+          placeholder="Cerca — anche da: oggetto: dopo: ha:allegati"
+          title="Filtri: da: a: oggetto: dopo: prima: ha:allegati stato:nonletti stato:contrassegnati. Invio cerca sul server."
           value={query}
           onChange={(e) => onQuery(e.target.value)}
-          onKeyDown={(e) => e.key === "Escape" && (onQuery(""), e.currentTarget.blur())}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              onQuery("");
+              e.currentTarget.blur();
+            } else if (e.key === "Enter" && query.trim()) {
+              onSearchServer();
+            }
+          }}
         />
         <span className="search-keys">
           <kbd>Ctrl</kbd>

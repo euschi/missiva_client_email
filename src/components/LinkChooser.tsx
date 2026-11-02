@@ -28,7 +28,7 @@ export function LinkChooser({ url, browsers, onClose }: Props) {
       .catch((e) => setError(errorText(e)));
 
   return (
-    <Modal label="Apri il link" onClose={onClose} short>
+    <Modal label="Apri il link" onClose={onClose} small>
       <header className="window-head">
         <span className="window-title">Con cosa apro il link?</span>
         <CloseButton onClose={onClose} />

@@ -18,6 +18,8 @@ export interface Prefs {
   markReadOnOpen: boolean;
   /** Carica subito immagini e stili remoti nei messaggi HTML. */
   remoteImages: boolean;
+  /** Secondi per annullare un invio; 0 lo spedisce subito. */
+  sendDelay: number;
 }
 
 export const PRESETS = [
@@ -41,6 +43,7 @@ export const DEFAULT_PREFS: Prefs = {
   closeToTray: true,
   markReadOnOpen: true,
   remoteImages: false,
+  sendDelay: 6,
 };
 
 const KEY = "missiva.prefs";
