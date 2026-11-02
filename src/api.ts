@@ -58,7 +58,24 @@ export const api = {
   moveToMailbox: (ms: Message[], mailbox: string): Promise<void> =>
     inTauri ? invoke("move_to_mailbox", { targets: ms.map(ref), mailbox }) : Promise.all(ms.map((m) => demo.move(m, "other"))).then(() => {}),
 
-  moveMessage: (m: Message, to: Folder): Promise<void> => (inTauri ? invoke("move_message", { target: ref(m), to }) : demo.move(m, to)),
+  /** Messaggi più vecchi di `m` nella sua casella. */
+  loadOlder: (m: Message): Promise<Message[]> => (inTauri ? invoke("load_older", { target: ref(m) }) : Promise.resolve([])),
+
+  /** Ricerca sul server in tutti gli account. */
+  searchMail: (query: string): Promise<SyncReport> => (inTauri ? invoke("search_mail", { query }) : demo.sync("archive")),
+
+  /** Copia gli allegati su disco e ne restituisce i percorsi, per un nuovo messaggio. */
+  prepareAttachments: (m: Message, indexes: number[]): Promise<string[]> =>
+    inTauri ? invoke("prepare_attachments", { target: ref(m), indexes }) : Promise.resolve(indexes.map((i) => m.attachments.find((f) => f.index === i)?.name ?? "allegato")),
+
+  saveDraft: (outgoing: Outgoing): Promise<void> => (inTauri ? invoke("save_draft", { outgoing }) : Promise.resolve()),
+
+  deleteDraft: (account: string, messageId: string): Promise<void> => (inTauri ? invoke("delete_draft", { account, messageId }) : Promise.resolve()),
+
+  deleteForever: (ms: Message[]): Promise<void> => (inTauri ? invoke("delete_forever", { targets: ms.map(ref) }) : Promise.resolve()),
+
+  /** Svuota il Cestino di un account, o di tutti. */
+  emptyTrash: (account: string | null): Promise<void> => (inTauri ? invoke("empty_trash", { account }) : Promise.resolve()),
 
   sendMessage: (outgoing: Outgoing): Promise<void> => (inTauri ? invoke("send_message", { outgoing }) : demo.send(outgoing)),
 

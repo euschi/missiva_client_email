@@ -1,9 +1,9 @@
-import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { api, errorText, inTauri } from "../api";
 import { initials, monoOf, providerLabel } from "../format";
 import { Icon, type IconName } from "../icons";
 import { hasFormatting, toHtml } from "../markdown";
-import type { Account, Draft, Outgoing } from "../types";
+import type { Account, Contact, Draft, Outgoing } from "../types";
 import { CloseButton, Modal } from "./Modal";
 import { Popover, WhenPicker } from "./Pickers";
 
@@ -13,21 +13,59 @@ interface Props {
   onClose: () => void;
   onSent: (account: Account, outgoing: Outgoing) => void;
   onScheduled: (account: Account, at: number) => void;
+  /** La cartella Bozze è cambiata; `saved` se Missiva vi ha appena lasciato la bozza. */
+  onDraftsChanged: (saved: boolean) => void;
+  contacts: Contact[];
 }
+
+/** Dopo quanto dall'ultima modifica la bozza si salva da sola. */
+const AUTOSAVE_MS = 15_000;
+const MAX_SUGGESTIONS = 6;
 
 const EMAIL = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
 
-/** Campo destinatari a "gettoni": Invio, virgola o Tab confermano un indirizzo. */
-function Recipients({ label, values, onChange, autoFocus }: { label: string; values: string[]; onChange: (v: string[]) => void; autoFocus?: boolean }) {
+interface RecipientsProps {
+  label: string;
+  values: string[];
+  onChange: (v: string[]) => void;
+  contacts: Contact[];
+  autoFocus?: boolean;
+}
+
+/** Campo destinatari a "gettoni": Invio, virgola o Tab confermano un indirizzo; suggerisce i contatti noti. */
+function Recipients({ label, values, onChange, contacts, autoFocus }: RecipientsProps) {
   const [text, setText] = useState("");
+  const [active, setActive] = useState<number | null>(null);
+  const needle = text.trim().toLowerCase();
+  const suggestions = needle
+    ? contacts.filter((c) => !values.includes(c.email) && (c.email.toLowerCase().includes(needle) || c.name.toLowerCase().includes(needle))).slice(0, MAX_SUGGESTIONS)
+    : [];
+  // Un indirizzo già completo non va sostituito per sbaglio dal primo suggerimento.
+  const current = active ?? (EMAIL.test(text.trim()) ? -1 : 0);
+  const choose = (email: string) => {
+    onChange([...values, email]);
+    setText("");
+    setActive(null);
+  };
   const commit = () => {
     const parts = text.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean);
     if (parts.length) onChange([...values, ...parts.filter((p) => !values.includes(p))]);
     setText("");
+    setActive(null);
   };
   const onKey = (e: KeyboardEvent<HTMLInputElement>) => {
-    if ((e.key === "Enter" || e.key === "," || e.key === ";" || (e.key === "Tab" && text)) && !e.ctrlKey) {
+    if (suggestions.length && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
       e.preventDefault();
+      const d = e.key === "ArrowDown" ? 1 : -1;
+      setActive((Math.max(current, d > 0 ? -1 : 0) + d + suggestions.length) % suggestions.length);
+    } else if (suggestions[current] && (e.key === "Enter" || e.key === "Tab") && !e.ctrlKey) {
+      e.preventDefault();
+      choose(suggestions[current].email);
+    } else if ((e.key === "Enter" || e.key === "," || e.key === ";" || (e.key === "Tab" && text)) && !e.ctrlKey) {
+      e.preventDefault();
+      commit();
+    } else if (e.key === "Escape" && suggestions.length) {
+      e.stopPropagation();
       commit();
     } else if (e.key === "Backspace" && !text && values.length) {
       onChange(values.slice(0, -1));
@@ -46,8 +84,41 @@ function Recipients({ label, values, onChange, autoFocus }: { label: string; val
       ))}
       <label style={{ flex: 1, minWidth: 160, display: "flex" }}>
         <span className="sr-only">{label}</span>
-        <input type="text" value={text} placeholder={values.length ? "" : "Aggiungi destinatario"} autoFocus={autoFocus} onChange={(e) => setText(e.target.value)} onKeyDown={onKey} onBlur={commit} />
+        <input
+          type="text"
+          value={text}
+          placeholder={values.length ? "" : "Aggiungi destinatario"}
+          autoFocus={autoFocus}
+          onChange={(e) => {
+            setText(e.target.value);
+            setActive(null);
+          }}
+          onKeyDown={onKey}
+          onBlur={commit}
+        />
       </label>
+      {suggestions.length > 0 && (
+        <div className="popover suggestions" role="listbox" aria-label="Contatti suggeriti">
+          {suggestions.map((c, i) => (
+            <button
+              key={c.email}
+              type="button"
+              role="option"
+              tabIndex={-1}
+              className="pop-item"
+              aria-selected={i === current}
+              // Il campo non deve perdere il fuoco, altrimenti confermerebbe il testo parziale.
+              onMouseDown={(e) => {
+                e.preventDefault();
+                choose(c.email);
+              }}
+            >
+              <span className="suggestion-name">{c.name}</span>
+              <span className="pop-hint">{c.email}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -70,7 +141,7 @@ const FORMATS: Format[] = [
   { icon: "quote", label: "Citazione", apply: (t) => ({ text: (t || "").split("\n").map((l) => `> ${l}`).join("\n") }) },
 ];
 
-export function Compose({ accounts, draft, onClose, onSent, onScheduled }: Props) {
+export function Compose({ accounts, draft, onClose, onSent, onScheduled, onDraftsChanged, contacts }: Props) {
   const [fromId, setFromId] = useState(draft.accountId ?? accounts[0]?.id);
   const [picking, setPicking] = useState(false);
   const [to, setTo] = useState(draft.to);
@@ -99,36 +170,122 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled }: Props
 
   const formatted = hasFormatting(body);
 
+  // Il Message-ID resta lo stesso per tutta la bozza: è ciò che lega i salvataggi successivi.
+  const messageId = useRef(draft.draftId ?? `${crypto.randomUUID()}@${from?.email.split("@")[1] || "missiva.local"}`);
+  const outgoing = (): Outgoing => ({
+    accountId: from?.id ?? "",
+    to,
+    cc,
+    bcc,
+    subject,
+    body,
+    html: formatted ? toHtml(body) : null,
+    attachments: files,
+    inReplyTo: draft.inReplyTo,
+    references: draft.references ?? [],
+    messageId: messageId.current,
+  });
+  const snapshot = JSON.stringify([from?.id, to, cc, bcc, subject, body, files]);
+  // Stato dell'ultimo render, per chi legge dopo un'attesa: conferma dei destinatari al blur compresa.
+  const latest = useRef({ outgoing, snapshot });
+  latest.current = { outgoing, snapshot };
+
+  const initial = useRef(snapshot);
+  const saved = useRef(snapshot);
+  /** Account in cui la bozza esiste già sul server. */
+  const savedIn = useRef<string | null>(draft.draftId ? (draft.accountId ?? null) : null);
+  const saving = useRef<Promise<void>>(Promise.resolve());
+  const [draftNote, setDraftNote] = useState<string | null>(null);
+  const [closeFailed, setCloseFailed] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
+  // Le modifiche a un messaggio programmato restano fuori da Bozze: si applicano solo reinviandolo.
+  const canSave = !draft.replaces && !!from;
+
+  /** I salvataggi passano in fila: arrivano al server nell'ordine in cui sono partiti. */
+  const persist = () => {
+    const { outgoing: current, snapshot: snap } = latest.current;
+    const out = current();
+    const previous = savedIn.current;
+    saving.current = saving.current
+      .catch(() => {})
+      .then(async () => {
+        await api.saveDraft(out);
+        savedIn.current = out.accountId;
+        saved.current = snap;
+        if (previous && previous !== out.accountId) await api.deleteDraft(previous, messageId.current).catch(() => {});
+      });
+    return saving.current;
+  };
+
+  useEffect(() => {
+    if (!canSave || sending || snapshot === saved.current) return;
+    const t = setTimeout(() => {
+      persist().then(
+        () => setDraftNote("Bozza salvata"),
+        (e) => setDraftNote(`Bozza non salvata: ${errorText(e)}`),
+      );
+    }, AUTOSAVE_MS);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshot, sending, canSave]);
+
+  /** Il campo destinatari conferma l'ultimo indirizzo al blur: aspetta che lo stato si aggiorni. */
+  const settleFields = async () => {
+    (document.activeElement as HTMLElement | null)?.blur();
+    await new Promise((r) => setTimeout(r, 0));
+  };
+
+  /** Chiudere non perde mai il testo: la bozza resta in Bozze. */
+  const close = async () => {
+    if (sending) return;
+    await settleFields();
+    const changed = canSave && latest.current.snapshot !== saved.current;
+    if (changed) {
+      try {
+        await persist();
+      } catch (e) {
+        if (!closeFailed) {
+          setCloseFailed(true);
+          setError(`Bozza non salvata: ${errorText(e)}. Chiudi di nuovo per uscire senza salvarla.`);
+          return;
+        }
+      }
+    }
+    if (savedIn.current) onDraftsChanged(changed);
+    onClose();
+  };
+
+  const discard = async () => {
+    await saving.current.catch(() => {});
+    if (savedIn.current) {
+      await api.deleteDraft(savedIn.current, messageId.current).catch((e) => setError(errorText(e)));
+      onDraftsChanged(false);
+    }
+    onClose();
+  };
+
   /** Invia subito oppure, con `at`, mette in coda per l'ora scelta. */
   const send = async (at?: number) => {
     if (sending || !from) return;
     setLater(false);
-    // Il campo destinatari conferma l'ultimo indirizzo al blur: aspetta che lo stato si aggiorni.
-    (document.activeElement as HTMLElement | null)?.blur();
-    await new Promise((r) => setTimeout(r, 0));
+    await settleFields();
     setError(null);
     setSending(true);
-    const outgoing: Outgoing = {
-      accountId: from.id,
-      to,
-      cc,
-      bcc,
-      subject,
-      body,
-      html: formatted ? toHtml(body) : null,
-      attachments: files,
-      inReplyTo: draft.inReplyTo,
-      references: draft.references ?? [],
-      messageId: `${crypto.randomUUID()}@${from.email.split("@")[1] || "missiva.local"}`,
-    };
+    const out = latest.current.outgoing();
     try {
       if (at) {
-        await api.scheduleMessage(outgoing, at);
-        onScheduled(from, at);
+        await api.scheduleMessage(out, at);
       } else {
-        await api.sendMessage(outgoing);
-        onSent(from, outgoing);
+        await api.sendMessage(out);
       }
+      // Partito: la bozza non serve più. Un errore qui non deve far credere che l'invio sia fallito.
+      await saving.current.catch(() => {});
+      if (savedIn.current) {
+        await api.deleteDraft(savedIn.current, messageId.current).catch(() => {});
+        onDraftsChanged(false);
+      }
+      if (at) onScheduled(from, at);
+      else onSent(from, out);
     } catch (e) {
       setError(errorText(e));
       setSending(false);
@@ -145,11 +302,11 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled }: Props
   };
 
   const invalid = [...to, ...cc, ...bcc].some((v) => !EMAIL.test(v));
-  const dirty = body !== draft.body || subject !== draft.subject || to.length !== draft.to.length || files.length > 0;
+  const dirty = snapshot !== initial.current;
   const attach = async () => setFiles([...files, ...(await api.pickFiles()).filter((f) => !files.includes(f))]);
 
   return (
-    <Modal label="Nuovo messaggio" onClose={onClose} dismissable={!dirty && !sending}>
+    <Modal label="Nuovo messaggio" onClose={close} dismissable={!dirty && !sending}>
       <div
         style={{ display: "contents" }}
         onKeyDown={(e) => {
@@ -167,7 +324,7 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled }: Props
             <span className="window-title">{draft.inReplyTo ? "Risposta" : "Nuovo messaggio"}</span>
             <span className="window-meta">{formatted ? "Testo formattato" : "Testo semplice"}</span>
           </div>
-          <CloseButton onClose={onClose} label="Chiudi e torna alla posta" />
+          <CloseButton onClose={close} label={canSave ? "Chiudi e salva in Bozze" : "Chiudi e torna alla posta"} />
         </header>
 
         <div className="compose-fields">
@@ -223,7 +380,7 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled }: Props
 
           <div className="field-row">
             <span className="field-label">A</span>
-            <Recipients label="Destinatari" values={to} onChange={setTo} autoFocus={to.length === 0} />
+            <Recipients label="Destinatari" values={to} onChange={setTo} contacts={contacts} autoFocus={to.length === 0} />
             <span className="cc-toggles">
               {!showCc && <button type="button" onClick={() => setShowCc(true)}>Cc</button>}
               {!showBcc && <button type="button" onClick={() => setShowBcc(true)}>Ccn</button>}
@@ -232,13 +389,13 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled }: Props
           {showCc && (
             <div className="field-row">
               <span className="field-label">Cc</span>
-              <Recipients label="Copia conoscenza" values={cc} onChange={setCc} />
+              <Recipients label="Copia conoscenza" values={cc} onChange={setCc} contacts={contacts} />
             </div>
           )}
           {showBcc && (
             <div className="field-row">
               <span className="field-label">Ccn</span>
-              <Recipients label="Copia conoscenza nascosta" values={bcc} onChange={setBcc} />
+              <Recipients label="Copia conoscenza nascosta" values={bcc} onChange={setBcc} contacts={contacts} />
             </div>
           )}
 
@@ -311,6 +468,11 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled }: Props
         <footer className="compose-foot">
           {error ? (
             <span className="foot-note error" role="alert">{error}</span>
+          ) : draftNote ? (
+            <span className={draftNote === "Bozza salvata" ? "foot-note" : "foot-note error"} role="status">
+              <Icon name={draftNote === "Bozza salvata" ? "check" : "alert"} size={13} stroke={2} />
+              {draftNote}
+            </span>
           ) : (
             from && (
               <span className="foot-note">
@@ -320,9 +482,29 @@ export function Compose({ accounts, draft, onClose, onSent, onScheduled }: Props
             )
           )}
           <div className="foot-actions">
-            <button type="button" className="icon-btn" style={{ width: 40, height: 40 }} aria-label="Elimina bozza" title="Elimina bozza" onClick={onClose}>
-              <Icon name="trash" size={17} stroke={1.7} />
-            </button>
+            {discarding ? (
+              <>
+                <button type="button" className="btn btn-soft btn-sm" onClick={() => setDiscarding(false)}>
+                  Tieni
+                </button>
+                <button type="button" className="btn btn-danger btn-sm" onClick={discard}>
+                  Elimina bozza
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="icon-btn"
+                style={{ width: 40, height: 40 }}
+                aria-label="Elimina bozza"
+                title="Elimina bozza"
+                disabled={sending}
+                // Si chiede conferma solo se c'è qualcosa da perdere.
+                onClick={() => (dirty || savedIn.current ? setDiscarding(true) : onClose())}
+              >
+                <Icon name="trash" size={17} stroke={1.7} />
+              </button>
+            )}
             <span className="pop-anchor">
               <button
                 type="button"

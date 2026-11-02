@@ -7,6 +7,8 @@ export const SHORTCUTS: { group: string; items: { keys: string[]; label: string 
       { keys: ["C"], label: "Scrivi un nuovo messaggio" },
       { keys: ["Ctrl", "K"], label: "Cerca in tutti gli account" },
       { keys: ["F5"], label: "Sincronizza ora" },
+      { keys: ["Invio"], label: "Nel campo di ricerca: cerca su tutta la posta del server" },
+      { keys: ["Ctrl", "Z"], label: "Annulla l'ultimo spostamento" },
       { keys: ["Esc"], label: "Chiudi la finestra o svuota la ricerca" },
     ],
   },

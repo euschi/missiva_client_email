@@ -332,11 +332,6 @@ async fn set_flags_many(targets: Vec<MessageRef>, seen: Option<bool>, flagged: O
     Ok(())
 }
 
-#[tauri::command]
-async fn move_message(target: MessageRef, to: Folder) -> Result<()> {
-    move_messages(vec![target], to).await
-}
-
 /// Sposta più messaggi in Archivio o Cestino: una sessione per casella.
 #[tauri::command]
 async fn move_messages(targets: Vec<MessageRef>, to: Folder) -> Result<()> {
@@ -365,6 +360,98 @@ async fn move_to_mailbox(targets: Vec<MessageRef>, mailbox: String) -> Result<()
         blocking(move || {
             imap_client::move_to_mailbox(&acc, &auth, &target.mailbox, &uids, &dest)?;
             mail::update_cache(&acc.id, &target.bucket(), |msgs| msgs.retain(|m| !uids.contains(&m.uid)))
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// Messaggi più vecchi di `target.uid` nella stessa casella.
+#[tauri::command]
+async fn load_older(target: MessageRef) -> Result<Vec<Message>> {
+    let acc = accounts::get(&target.account_id)?;
+    let auth = auth_for(&acc).await?;
+    blocking(move || imap_client::fetch_older(&acc, &auth, target.folder, &target.mailbox, target.uid)).await
+}
+
+/// Cerca sul server in tutti gli account, in parallelo; gli errori restano per account.
+#[tauri::command]
+async fn search_mail(query: String) -> Result<SyncReport> {
+    let tasks: Vec<_> = accounts::load()?
+        .into_iter()
+        .map(|acc| {
+            let query = query.clone();
+            let id = acc.id.clone();
+            let task = tauri::async_runtime::spawn(async move {
+                let auth = auth_for(&acc).await?;
+                blocking(move || imap_client::search(&acc, &auth, &query)).await
+            });
+            (id, task)
+        })
+        .collect();
+    let mut report = SyncReport { messages: Vec::new(), errors: Vec::new() };
+    for (account_id, task) in tasks {
+        match task.await.map_err(|e| msg(e.to_string())).and_then(|r| r) {
+            Ok(found) => report.messages.extend(found),
+            Err(e) => report.errors.push(SyncError { account_id, message: e.to_string() }),
+        }
+    }
+    Ok(report)
+}
+
+/// Copia gli allegati su disco e ne restituisce i percorsi, per metterli in un nuovo messaggio.
+#[tauri::command]
+async fn prepare_attachments(target: MessageRef, indexes: Vec<usize>) -> Result<Vec<String>> {
+    let raw = raw_message(target).await?;
+    blocking(move || mail::attachment_files(&raw, &indexes)).await
+}
+
+/// Salva la bozza nella cartella Bozze: sostituisce quella con lo stesso Message-ID.
+#[tauri::command]
+async fn save_draft(outgoing: smtp::Outgoing) -> Result<()> {
+    let id = outgoing.message_id.clone().ok_or_else(|| msg("Bozza senza identificativo"))?;
+    let acc = accounts::get(&outgoing.account_id)?;
+    let auth = auth_for(&acc).await?;
+    blocking(move || {
+        let message = smtp::build_draft(&acc, &outgoing)?;
+        imap_client::save_draft(&acc, &auth, &message.formatted(), &id)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_draft(account: String, message_id: String) -> Result<()> {
+    let acc = accounts::get(&account)?;
+    let auth = auth_for(&acc).await?;
+    blocking(move || imap_client::delete_draft(&acc, &auth, &message_id)).await
+}
+
+/// Elimina per sempre messaggi che sono già nel Cestino; con gli altri si rifiuta.
+#[tauri::command]
+async fn delete_forever(targets: Vec<MessageRef>) -> Result<()> {
+    if targets.iter().any(|t| t.folder != Folder::Trash) {
+        return Err(msg("Si eliminano definitivamente solo i messaggi nel Cestino"));
+    }
+    for (target, uids) in by_mailbox(targets) {
+        let acc = accounts::get(&target.account_id)?;
+        let auth = auth_for(&acc).await?;
+        blocking(move || {
+            imap_client::delete_forever(&acc, &auth, &target.mailbox, &uids)?;
+            mail::update_cache(&acc.id, &target.bucket(), |msgs| msgs.retain(|m| !uids.contains(&m.uid)))
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// Svuota il Cestino di un account, o di tutti senza `account`.
+#[tauri::command]
+async fn empty_trash(account: Option<String>) -> Result<()> {
+    for acc in accounts::load()?.into_iter().filter(|a| account.as_ref().is_none_or(|id| &a.id == id)) {
+        let auth = auth_for(&acc).await?;
+        blocking(move || {
+            imap_client::empty_trash(&acc, &auth)?;
+            mail::write_cache(&acc.id, Folder::Trash.key(), &[])
         })
         .await?;
     }
@@ -570,12 +657,7 @@ async fn open_attachment(handle: AppHandle, target: MessageRef, index: usize) ->
         let dir = dirs::download_dir()
             .or_else(dirs::home_dir)
             .ok_or_else(|| msg("Cartella Scaricati non trovata"))?;
-        // Il nome arriva dal mittente: tieni solo l'ultimo componente del percorso.
-        let safe = std::path::Path::new(&name)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "allegato".into());
-        let path = dir.join(safe);
+        let path = dir.join(mail::safe_name(&name));
         std::fs::write(&path, bytes)?;
         Ok(path)
     })
@@ -641,9 +723,15 @@ pub fn run() {
             cached_messages,
             sync_folder,
             set_flags,
-            move_message,
             move_messages,
             move_to_mailbox,
+            load_older,
+            search_mail,
+            prepare_attachments,
+            save_draft,
+            delete_draft,
+            delete_forever,
+            empty_trash,
             open_link,
             list_browsers,
             open_link_with,

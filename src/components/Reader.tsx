@@ -19,6 +19,8 @@ interface Props {
   onToggleRead: (m: Message) => void;
   onReply: (m: Message, all: boolean) => void;
   onForward: (m: Message) => void;
+  /** Riapre una bozza nella finestra Scrivi. */
+  onResumeDraft: (m: Message) => void;
   onQuickReply: (m: Message, text: string) => Promise<boolean>;
   /** Apre il visore sull'allegato `index`. */
   onPreview: (m: Message, index: number) => void;
@@ -62,7 +64,6 @@ interface Props {
 
 export function Reader(p: Props) {
   const m = p.message;
-  const canMove = m && m.folder !== "trash";
   const toggle = (menu: ReaderMenu) => p.onMenu(p.menu === menu ? null : menu);
   const close = () => p.onMenu(null);
   if (p.bulk) return <BulkPanel {...p} bulk={p.bulk} />;
@@ -76,7 +77,7 @@ export function Reader(p: Props) {
             <button type="button" className="icon-btn lg" aria-label="Archivia" title="Archivia" disabled={!m || m.folder === "archive"} onClick={() => m && p.onArchive(m)}>
               <Icon name="archive" size={17} stroke={1.7} />
             </button>
-            <button type="button" className="icon-btn lg" aria-label="Sposta nel cestino" title="Sposta nel cestino" disabled={!canMove} onClick={() => m && p.onDelete(m)}>
+            <button type="button" className="icon-btn lg" aria-label={m?.folder === "trash" ? "Elimina definitivamente" : "Sposta nel cestino"} title={m?.folder === "trash" ? "Elimina definitivamente" : "Sposta nel cestino"} disabled={!m} onClick={() => m && p.onDelete(m)}>
               <Icon name="trash" size={17} stroke={1.7} />
             </button>
             <button
@@ -141,6 +142,12 @@ export function Reader(p: Props) {
             </span>
           </div>
           <div className="toolbar-group end">
+            {m?.folder === "drafts" && (
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => p.onResumeDraft(m)}>
+                <Icon name="pen" size={15} />
+                Riprendi
+              </button>
+            )}
             <button type="button" className="btn btn-soft btn-sm" disabled={!m} onClick={() => m && p.onReply(m, false)}>
               <Icon name="reply" size={15} />
               Rispondi
@@ -467,6 +474,7 @@ function BulkPanel({ bulk, onBulkMove, onBulkFlags, onBulkClear, bulkBoxes, bulk
   const toggleMenu = (next: ReaderMenu) => onMenu(menu === next ? null : next);
   const allFlagged = bulk.every((m) => m.flagged);
   const anyUnread = bulk.some((m) => m.unread);
+  const allTrash = bulk.every((m) => m.folder === "trash");
   const shown = bulk.slice(0, 8);
   return (
     <main className="reader">
@@ -475,7 +483,7 @@ function BulkPanel({ bulk, onBulkMove, onBulkFlags, onBulkClear, bulkBoxes, bulk
           <button type="button" className="icon-btn lg" aria-label="Archivia i selezionati" title="Archivia (E)" onClick={() => onBulkMove("archive")}>
             <Icon name="archive" size={17} stroke={1.7} />
           </button>
-          <button type="button" className="icon-btn lg" aria-label="Sposta i selezionati nel cestino" title="Sposta nel cestino (Canc)" onClick={() => onBulkMove("trash")}>
+          <button type="button" className="icon-btn lg" aria-label={allTrash ? "Elimina definitivamente i selezionati" : "Sposta i selezionati nel cestino"} title={allTrash ? "Elimina definitivamente" : "Sposta nel cestino (Canc)"} onClick={() => onBulkMove("trash")}>
             <Icon name="trash" size={17} stroke={1.7} />
           </button>
           <button
