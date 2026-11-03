@@ -86,6 +86,12 @@ export function MessageList({ title, subtitle, chip, onChip, messages, accounts,
   const press = useRef<{ m: Message; x: number; y: number; dragging: boolean } | null>(null);
   const hoverEl = useRef<Element | null>(null);
   const [ghost, setGhost] = useState<{ x: number; y: number; count: number } | null>(null);
+  const selectedRow = useRef<HTMLButtonElement>(null);
+
+  // Il messaggio aperto da fuori (una notifica) può stare più in basso nell'elenco.
+  useEffect(() => {
+    selectedRow.current?.scrollIntoView({ block: "nearest" });
+  }, [selectedId]);
 
   const setHover = (el: Element | null) => {
     if (hoverEl.current === el) return;
@@ -189,6 +195,7 @@ export function MessageList({ title, subtitle, chip, onChip, messages, accounts,
                   type="button"
                   className={["row", m.unread && "unread", isChecked && "checked"].filter(Boolean).join(" ")}
                   aria-current={m.id === selectedId}
+                  ref={m.id === selectedId ? selectedRow : undefined}
                   // Maiusc + clic non deve selezionare il testo delle righe.
                   onMouseDown={(e) => e.shiftKey && e.preventDefault()}
                   onClick={(e) => onSelect(m, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}

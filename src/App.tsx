@@ -16,7 +16,7 @@ import { TitleBar } from "./components/TitleBar";
 import { longTime, plural, relativeSync } from "./format";
 import { Icon } from "./icons";
 import { matchesSearch, parseMailto, parseSearch, quotedHtmlBlock, suspiciousLink } from "./mailtext";
-import { notifyNewMail } from "./notify";
+import { listenNotificationClicks, notifyNewMail, type NotificationTarget } from "./notify";
 import { buildThreads } from "./threads";
 import { applyPrefs, loadPrefs, savePrefs, type Prefs } from "./prefs";
 import { keyOf, useStore, type Labels, type Rule, type Snooze, type Template } from "./store";
@@ -155,6 +155,7 @@ export function App() {
   const runRulesRef = useRef<(added: Message[]) => Set<string>>(() => new Set());
   const pullLabelsRef = useRef<() => void>(() => {});
   const flushRef = useRef<() => void | Promise<void>>(() => {});
+  const openNotifiedRef = useRef<(target: NotificationTarget | null) => void>(() => {});
   const searchRef = useRef<HTMLInputElement>(null);
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
@@ -340,6 +341,8 @@ export function App() {
     };
   }, [sync]);
 
+  useEffect(() => listenNotificationClicks((target) => openNotifiedRef.current(target)), []);
+
   const viewRef = useRef(view);
   viewRef.current = view;
 
@@ -458,6 +461,26 @@ export function App() {
         notify(errorText(e), true);
       });
     }
+  };
+
+  /** Clic su una notifica: finestra in primo piano e posta in arrivo senza filtri che nascondano il messaggio. */
+  openNotifiedRef.current = (target) => {
+    api.showWindow().catch(() => {});
+    if (!target) return;
+    // Un messaggio che si sta scrivendo non va perso: la composizione resta aperta.
+    setModal((cur) => (cur?.kind === "compose" ? cur : null));
+    setQuery("");
+    setServerQuery(null);
+    setChip("all");
+    setLabelFilter(null);
+    setAccountFilter("all");
+    if (box || view !== "inbox") changeView("inbox");
+    setChecked([]);
+    setMenu(null);
+    if ("inbox" in target) return;
+    const m = inbox.find((x) => x.id === target.messageId);
+    if (m) select(m);
+    else notify("Questo messaggio non è più in Posta in arrivo");
   };
 
   /** Messaggi tra due id dell'elenco visibile, estremi compresi. */

@@ -27,6 +27,16 @@ Lo script usa `makepkg` con `packaging/arch/PKGBUILD`: installa le dipendenze ma
 
 I client ID presenti in `.env` al momento della build finiscono nel binario: chi installa il pacchetto accede con il proprio account Google o Microsoft senza configurare nulla. Variabili d'ambiente e `~/.config/missiva/oauth.json` restano un override a runtime.
 
+## AppImage
+
+```sh
+scripts/build-appimage.sh     # crea dist-appimage/missiva_v<versione>.AppImage
+```
+
+Per installarla basta renderla eseguibile e avviarla una volta (`chmod +x missiva_v*.AppImage && ./missiva_v*.AppImage`), senza `sudo`: Missiva crea da sola la voce nel menu applicazioni e l'icona in `~/.local/share`, e le riallinea se il file viene spostato. Cancellando l'AppImage la voce sparisce dal menu.
+
+Serve un servizio Secret Service attivo (GNOME Keyring o KWallet). Il sistema deve avere una glibc almeno pari a quella della macchina su cui è stata compilata: per le distribuzioni più vecchie va compilata su una base altrettanto vecchia.
+
 ## Account
 
 - **IMAP / SMTP**: email e password (o password per app). I server vengono cercati in automatico nel database ISPDB di Thunderbird e restano modificabili.

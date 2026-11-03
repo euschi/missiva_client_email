@@ -165,6 +165,9 @@ export const api = {
 
   setTrayUnread: (count: number): Promise<void> => (inTauri ? invoke("set_tray_unread", { count }) : Promise.resolve()),
 
+  /** Riporta in primo piano la finestra, anche se nascosta nell'area di notifica. */
+  showWindow: (): Promise<void> => (inTauri ? invoke("show_window") : Promise.resolve()),
+
   pickFiles: async (): Promise<string[]> => {
     if (!inTauri) return [];
     const picked = await open({ multiple: true, title: "Allega file" });
