@@ -1,4 +1,5 @@
 mod accounts;
+mod appimage;
 mod autoconfig;
 mod browsers;
 mod calendar;
@@ -974,6 +975,11 @@ fn set_tray_unread(handle: AppHandle, count: usize) {
     tray::set_unread(&handle, count);
 }
 
+#[tauri::command]
+fn show_window(handle: AppHandle) {
+    tray::show_main(&handle);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -993,6 +999,9 @@ pub fn run() {
             // L'app funziona anche senza area di notifica: in quel caso chiudere la finestra la chiude davvero.
             if let Err(e) = tray::setup(app) {
                 eprintln!("Area di notifica non disponibile: {e}");
+            }
+            if let Err(e) = appimage::integrate() {
+                eprintln!("Voce nel menu applicazioni non creata: {e}");
             }
             watchers::refresh(app.handle());
             // Invio dei messaggi programmati, anche con la finestra nascosta.
@@ -1062,6 +1071,7 @@ pub fn run() {
             clear_cache,
             tray_available,
             set_tray_unread,
+            show_window,
         ])
         .run(tauri::generate_context!())
         .expect("errore durante l'avvio di Missiva");
