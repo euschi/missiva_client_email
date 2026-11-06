@@ -1331,6 +1331,18 @@ export function App() {
     else notify(`${a.name}: sincronizzazione non riuscita, dettagli sull'account nella barra laterale`, true);
   };
 
+  /** Rifà l'accesso nel browser e risincronizza l'account. */
+  const reconnectAccount = async (a: Account) => {
+    notify(`${a.name}: completa l'accesso nel browser`);
+    try {
+      await api.reconnectAccount(a.id);
+    } catch (e) {
+      notify(`${a.name}: ${errorText(e)}`, true);
+      return;
+    }
+    await resyncAccount(a);
+  };
+
   const reorderAccounts = async (ids: string[]) => {
     const before = accounts;
     const pos = (a: Account) => ids.indexOf(a.id);
@@ -1499,6 +1511,7 @@ export function App() {
           resyncing={resyncing}
           onRenameAccount={renameAccount}
           onResyncAccount={resyncAccount}
+          onReconnectAccount={reconnectAccount}
           onReorderAccounts={reorderAccounts}
           onCreateBox={createBox}
           onRenameBox={renameBox}

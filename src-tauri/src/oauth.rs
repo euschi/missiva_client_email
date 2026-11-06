@@ -6,6 +6,7 @@
 //! e infine dai valori delle stesse variabili presenti al momento della compilazione.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -226,11 +227,38 @@ async fn wait_redirect(listener: tokio::net::TcpListener) -> Result<HashMap<Stri
     }
 }
 
+/// Testo dell'errore quando serve rifare l'accesso: il frontend lo riconosce da qui
+/// (`REAUTH_HINT` in src/format.ts) per proporre «Ricollega».
+pub const REAUTH_HINT: &str = "ricollega l'account";
+
+#[derive(Deserialize)]
+struct TokenError {
+    error: String,
+    error_description: Option<String>,
+}
+
 async fn post_token(url: &str, form: &[(&str, &str)]) -> Result<TokenResponse> {
-    let resp = reqwest::Client::new().post(url).form(form).send().await?;
+    let resp = reqwest::Client::new()
+        .post(url)
+        .form(form)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await?;
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(msg(format!("Errore dal server OAuth: {body}")));
+        return Err(match serde_json::from_str::<TokenError>(&body) {
+            // Refresh token scaduto o revocato (password cambiata, accesso tolto, app Google
+            // ancora in «Testing», che fa scadere i token dopo 7 giorni): senza un nuovo login non si rimedia.
+            Ok(e) if e.error == "invalid_grant" => msg(format!(
+                "Accesso scaduto o revocato dal provider: {REAUTH_HINT} ({})",
+                e.error_description.unwrap_or(e.error)
+            )),
+            Ok(e) => msg(format!(
+                "Errore dal server OAuth: {}",
+                e.error_description.map(|d| format!("{} ({d})", e.error)).unwrap_or(e.error)
+            )),
+            Err(_) => msg(format!("Errore dal server OAuth: {body}")),
+        });
     }
     Ok(resp.json().await?)
 }
@@ -250,8 +278,23 @@ fn decode_claims(jwt: &str) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
+/// Un lucchetto per account: le operazioni partono in parallelo (sync di più cartelle, IDLE, invio)
+/// e senza lucchetto ognuna chiederebbe il proprio token nuovo, sovrascrivendo le altre nel portachiavi.
+fn refresh_lock(account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: Mutex<Option<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = Mutex::new(None);
+    let mut guard = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .get_or_insert_with(HashMap::new)
+        .entry(account_id.to_string())
+        .or_default()
+        .clone()
+}
+
 /// Access token valido per l'account, rinnovato se scade entro un minuto.
 pub async fn access_token(account: &Account) -> Result<String> {
+    let lock = refresh_lock(&account.id);
+    let _held = lock.lock().await;
+    // Riletto dopo il lucchetto: chi aspettava trova il token già rinnovato da chi lo teneva.
     let Secret::Oauth { refresh_token, access_token, expires_at } = secrets::load(&account.id)? else {
         return Err(msg("L'account non usa OAuth"));
     };
