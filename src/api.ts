@@ -21,6 +21,9 @@ export const api = {
   addOauthAccount: (provider: Provider, syncDays: number): Promise<Account> =>
     inTauri ? invoke("add_oauth_account", { provider, syncDays }) : demo.addOauthAccount(provider),
 
+  reconnectAccount: (id: string): Promise<void> =>
+    inTauri ? invoke("reconnect_account", { id }) : Promise.reject("Nell’anteprima del browser l’accesso OAuth non è disponibile."),
+
   updateAccount: (patch: AccountPatch): Promise<Account> => (inTauri ? invoke("update_account", { patch }) : demo.updateAccount(patch)),
 
   reorderAccounts: (ids: string[]): Promise<Account[]> => (inTauri ? invoke("reorder_accounts", { ids }) : demo.reorderAccounts(ids)),

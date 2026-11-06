@@ -1,5 +1,5 @@
 import { useRef, useState, type PointerEvent } from "react";
-import { monoOf, providerLabel } from "../format";
+import { monoOf, needsReauth, providerLabel } from "../format";
 import { Icon, type IconName } from "../icons";
 import type { Label } from "../store";
 import { Popover } from "./Pickers";
@@ -36,6 +36,8 @@ interface Props {
   resyncing: string[];
   onRenameAccount: (a: Account, name: string) => void;
   onResyncAccount: (a: Account) => void;
+  /** Nuovo accesso OAuth quando il token non si rinnova più. */
+  onReconnectAccount: (a: Account) => void;
   onReorderAccounts: (ids: string[]) => void;
   onCreateBox: (accountId: string, parent: Mailbox | null) => void;
   onRenameBox: (accountId: string, box: Mailbox) => void;
@@ -307,7 +309,13 @@ function AccountList(p: Props & { branches: Branches }) {
                 <span className="meta">
                   <span className="name">{a.name}</span>
                   <span className="sub">
-                    {busy ? "Risincronizzo…" : error ? "Errore di sincronizzazione" : providerLabel(a.provider, a.imap.host)}
+                    {busy
+                      ? "Risincronizzo…"
+                      : needsReauth(error)
+                        ? "Accesso scaduto: ricollega"
+                        : error
+                          ? "Errore di sincronizzazione"
+                          : providerLabel(a.provider, a.imap.host)}
                   </span>
                 </span>
                 {busy ? <Icon name="sync" size={14} stroke={2} className="spin count" /> : <span className="count">{show(p.unreadByAccount[a.id])}</span>}
@@ -339,6 +347,11 @@ function AccountList(p: Props & { branches: Branches }) {
                   <span>Risincronizza</span>
                   <Icon name="sync" size={15} stroke={1.8} />
                 </button>
+                {a.provider !== "imap" && (
+                  <button type="button" className="pop-item" disabled={busy} onClick={() => (close(), p.onReconnectAccount(a))}>
+                    <span>Ricollega account…</span>
+                  </button>
+                )}
                 {p.accounts.length > 1 && (
                   <>
                     <button type="button" className="pop-item" disabled={i === 0} onClick={() => (close(), move(a.id, i - 1))}>
