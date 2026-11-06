@@ -147,6 +147,17 @@ mod watchers {
         }
     }
 
+    /// Ferma e riavvia il controllo di un account, ad esempio dopo nuove credenziali.
+    pub fn restart(handle: &AppHandle, id: &str) {
+        {
+            let mut guard = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(stop) = guard.as_mut().and_then(|r| r.remove(id)) {
+                stop.store(true, Ordering::Relaxed);
+            }
+        }
+        refresh(handle);
+    }
+
     async fn watch(handle: AppHandle, acc: accounts::Account, stop: Arc<AtomicBool>) {
         let mut retry = RETRY_MIN;
         while !stop.load(Ordering::Relaxed) {
@@ -191,6 +202,30 @@ async fn add_oauth_account(handle: AppHandle, provider: Provider, sync_days: u32
     let saved = persist(acc, &authz.secret)?;
     watchers::refresh(&handle);
     Ok(saved)
+}
+
+/// Rifà l'accesso OAuth di un account esistente quando il refresh token non vale più,
+/// tenendo impostazioni, firme e cache. L'indirizzo scelto nel browser deve essere lo stesso.
+#[tauri::command]
+async fn reconnect_account(handle: AppHandle, id: String) -> Result<()> {
+    let acc = accounts::load()?
+        .into_iter()
+        .find(|a| a.id == id)
+        .ok_or_else(|| msg("Account non trovato"))?;
+    if acc.provider == Provider::Imap {
+        return Err(msg("Gli account IMAP usano la password, non un accesso da ricollegare"));
+    }
+    let authz = oauth::authorize(&handle, acc.provider).await?;
+    if !authz.email.eq_ignore_ascii_case(&acc.email) {
+        return Err(msg(format!(
+            "Nel browser hai scelto {}, ma l'account da ricollegare è {}",
+            authz.email, acc.email
+        )));
+    }
+    secrets::store(&acc.id, &authz.secret)?;
+    // Il controllo IDLE potrebbe essere in attesa fino a 10 minuti: lo si riparte subito.
+    watchers::restart(&handle, &acc.id);
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1019,6 +1054,7 @@ pub fn run() {
             autoconfig,
             add_imap_account,
             add_oauth_account,
+            reconnect_account,
             update_account,
             remove_account,
             reorder_accounts,

@@ -1,6 +1,6 @@
 # Pacchetto Arch compilato dal repository locale: usare scripts/build-arch.sh.
 pkgname=missiva
-pkgver=0.3.1
+pkgver=0.3.2
 pkgrel=1
 pkgdesc="Client email per Linux con posta in arrivo unificata"
 arch=('x86_64' 'aarch64')

@@ -63,6 +63,10 @@ export const plural = (n: number, one: string, many: string) => (n === 1 ? `1 ${
 
 export const monoOf = (name: string) => (name.trim()[0] ?? "?").toUpperCase();
 
+/** Lo stesso testo di `REAUTH_HINT` in src-tauri/src/oauth.rs: l'errore chiede un nuovo accesso. */
+const REAUTH_HINT = "ricollega l'account";
+export const needsReauth = (error: string | undefined) => !!error?.includes(REAUTH_HINT);
+
 export const providerLabel = (p: string, host: string) =>
   p === "google" ? "Gmail · Google" : p === "microsoft" ? "Microsoft 365" : `IMAP · ${host}`;
 
