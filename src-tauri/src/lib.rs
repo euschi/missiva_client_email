@@ -1,4 +1,5 @@
 mod accounts;
+mod ai;
 mod appimage;
 mod autoconfig;
 mod browsers;
@@ -792,6 +793,23 @@ fn open_link_with(browser: String, url: String) -> Result<()> {
     browsers::open_with(&browser, &browsers::checked_url(&url)?)
 }
 
+/// Agenti AI installati a cui mandare una conversazione.
+#[tauri::command]
+fn list_ai_agents() -> Vec<ai::Agent> {
+    ai::list()
+}
+
+/// Manda il testo all'agente e ne attende la risposta; `request` serve ad annullarla.
+#[tauri::command]
+async fn ask_ai(request: String, agent: String, prompt: String) -> Result<String> {
+    blocking(move || ai::ask(&request, &agent, &prompt)).await
+}
+
+#[tauri::command]
+fn cancel_ai(request: String) {
+    ai::cancel(&request);
+}
+
 async fn deliver(outgoing: smtp::Outgoing) -> Result<()> {
     if outgoing.to.is_empty() {
         return Err(msg("Aggiungi almeno un destinatario"));
@@ -1090,6 +1108,9 @@ pub fn run() {
             open_link,
             list_browsers,
             open_link_with,
+            list_ai_agents,
+            ask_ai,
+            cancel_ai,
             set_flags_many,
             send_message,
             schedule_message,

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "re
 import { api, errorText } from "../api";
 import { fileSize } from "../format";
 import { Icon } from "../icons";
+import { loadPdfjs } from "../pdf";
 import type { Attachment, Message } from "../types";
 import { CloseButton } from "./Modal";
 
@@ -286,8 +287,7 @@ function PdfView({ bytes, zoom }: { bytes: ArrayBuffer; zoom: number }) {
     let destroy = () => {};
     pages.current = [];
     (async () => {
-      const [pdfjs, worker] = await Promise.all([import("pdfjs-dist"), import("pdfjs-dist/build/pdf.worker.min.mjs?url")]);
-      pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
+      const pdfjs = await loadPdfjs();
       // pdf.js trasferisce il buffer al worker: gli si passa una copia.
       const task = pdfjs.getDocument({ data: new Uint8Array(bytes.slice(0)) });
       destroy = () => void task.destroy();
