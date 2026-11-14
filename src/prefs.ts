@@ -20,6 +20,8 @@ export interface Prefs {
   remoteImages: boolean;
   /** Secondi per annullare un invio; 0 lo spedisce subito. */
   sendDelay: number;
+  /** Ultimo agente usato in «Chiedi all'AI». */
+  aiAgent: string;
 }
 
 export const PRESETS = [
@@ -44,6 +46,7 @@ export const DEFAULT_PREFS: Prefs = {
   markReadOnOpen: true,
   remoteImages: false,
   sendDelay: 6,
+  aiAgent: "",
 };
 
 const KEY = "missiva.prefs";

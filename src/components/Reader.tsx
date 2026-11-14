@@ -32,6 +32,8 @@ interface Props {
   onBulkSpam: () => void;
   onPrint: () => void;
   onExport: (m: Message) => void;
+  /** Manda la conversazione a un agente AI installato. */
+  onAskAi: (m: Message) => void;
   onSaveAttachment: (m: Message, file: Attachment) => void;
   onSaveAll: (m: Message, files: Attachment[]) => void;
   onUnsubscribe: (m: Message, info: Unsubscribe) => void;
@@ -155,6 +157,10 @@ export function Reader(p: Props) {
               </button>
               {m && p.menu === "more" && (
                 <Popover label="Altre azioni" onClose={close}>
+                  <button type="button" className="pop-item" onClick={() => (close(), p.onAskAi(m))}>
+                    <span className="label-name"><Icon name="sparkle" size={15} stroke={1.8} />Chiedi all’AI…</span>
+                    <kbd>I</kbd>
+                  </button>
                   <button type="button" className="pop-item" onClick={() => (close(), p.onSpam(m))}>
                     <span className="label-name"><Icon name="ban" size={15} stroke={1.8} />Segnala come spam</span>
                   </button>

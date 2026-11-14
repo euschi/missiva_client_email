@@ -57,6 +57,13 @@ export interface Browser {
   name: string;
 }
 
+/** Agente AI installato sul computer (Claude Code, Codex, Gemini CLI). */
+export interface AiAgent {
+  id: string;
+  name: string;
+  path: string;
+}
+
 export interface Mailbox {
   /** Nome IMAP esatto, da usare con il server. */
   path: string;

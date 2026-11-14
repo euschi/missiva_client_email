@@ -5,6 +5,7 @@ import { api, errorText, inTauri } from "./api";
 import { AddAccount } from "./components/AddAccount";
 import { Compose } from "./components/Compose";
 import { Confirm, Prompt } from "./components/Modal";
+import { AskAi } from "./components/AskAi";
 import { LinkChooser } from "./components/LinkChooser";
 import { MessageList, type Chip, type DropTarget, type RowMenuItem } from "./components/MessageList";
 import { nextLabelColor } from "./components/Pickers";
@@ -29,6 +30,7 @@ type ModalState =
   | { kind: "prompt"; title: string; label: string; initial?: string; action: string; run: (value: string) => void }
   | { kind: "preview"; message: Message; index: number }
   | { kind: "link"; url: string; browsers: Browser[] }
+  | { kind: "ai"; message: Message; thread: Message[] }
   | { kind: "confirm"; title: string; text: string; action: string; run: () => void };
 
 /** Tutto ciò che serve per spedire e, se serve, riaprire un messaggio pronto a partire. */
@@ -780,12 +782,12 @@ export function App() {
     return view ? quotedHtmlBlock(intro, view.html) : null;
   };
 
-  const reply = async (m: Message, all: boolean) => {
+  const reply = async (m: Message, all: boolean, body = "") => {
     const own = accountsById[m.accountId]?.email.toLowerCase();
     const others = all ? [...m.to, ...m.cc].map((c) => c.email).filter((e) => e.toLowerCase() !== own && e !== m.fromEmail) : [];
     const text = quote(m).trim();
     const quoteHtml = await quotedHtmlOf(m, text.split("\n")[0]);
-    compose({ accountId: m.accountId, to: replyTo(m), cc: others, subject: prefixed("Re:", m.subject), body: "", quote: text, quoteHtml, inReplyTo: m.messageId, references: chainOf(m) });
+    compose({ accountId: m.accountId, to: replyTo(m), cc: others, subject: prefixed("Re:", m.subject), body, quote: text, quoteHtml, inReplyTo: m.messageId, references: chainOf(m) });
   };
 
   /** Copia su disco gli allegati veri del messaggio; se non riesce avvisa e prosegue senza. */
@@ -830,6 +832,12 @@ export function App() {
   };
 
   /** Chi riceve la risposta: il mittente, oppure i destinatari se il messaggio l'ho mandato io. */
+  /** «Chiedi all'AI» sulla conversazione del messaggio. */
+  const askAi = (m: Message) => {
+    const thread = threads.of(m);
+    setModal({ kind: "ai", message: m, thread: thread.length ? thread : [m] });
+  };
+
   const replyTo = (m: Message) => (isMine(m) ? m.to.map((c) => c.email) : [m.fromEmail]);
   const isMine = (m: Message) => m.fromEmail.toLowerCase() === accountsById[m.accountId]?.email.toLowerCase();
   const chainOf = (m: Message) => [...m.references, ...(m.messageId ? [m.messageId] : [])];
@@ -1415,6 +1423,7 @@ export function App() {
             b: () => selected.folder === "inbox" && setMenu("snooze"),
             l: () => setMenu("label"),
             r: () => reply(selected, false),
+            i: () => askAi(selected),
             a: () => reply(selected, true),
             f: () => forward(selected),
             e: () => moveMany([selected], "archive"),
@@ -1594,6 +1603,7 @@ export function App() {
           onBulkSpam={() => bulk && markSpam(bulk)}
           onPrint={() => window.print()}
           onExport={exportEml}
+          onAskAi={askAi}
           onSaveAttachment={saveAttachment}
           onSaveAll={saveAll}
           onUnsubscribe={unsubscribe}
@@ -1650,6 +1660,21 @@ export function App() {
       )}
       {modal?.kind === "prompt" && <Prompt title={modal.title} label={modal.label} initial={modal.initial} action={modal.action} onSubmit={modal.run} onClose={() => setModal(null)} />}
       {modal?.kind === "confirm" && <Confirm title={modal.title} text={modal.text} action={modal.action} onConfirm={modal.run} onClose={() => setModal(null)} />}
+      {modal?.kind === "ai" && (
+        <AskAi
+          thread={modal.thread}
+          lastAgent={prefs.aiAgent}
+          onAgent={(id) => id !== prefs.aiAgent && setPrefs({ ...prefs, aiAgent: id })}
+          onUseAsReply={(text) => {
+            // Si risponde all'ultimo messaggio degli altri, come nella risposta rapida.
+            const target = [...modal.thread].reverse().find((x) => !isMine(x)) ?? modal.message;
+            setModal(null);
+            void reply(target, false, text);
+          }}
+          onLink={openLink}
+          onClose={() => setModal(null)}
+        />
+      )}
       {modal?.kind === "link" && <LinkChooser url={modal.url} browsers={modal.browsers} onClose={() => setModal(null)} />}
       {modal?.kind === "account" && <AddAccount onClose={() => setModal(null)} onAdded={accountAdded} />}
       {modal?.kind === "settings" && (

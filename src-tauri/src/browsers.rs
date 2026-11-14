@@ -35,13 +35,19 @@ pub fn checked_url(raw: &str) -> Result<String> {
 }
 
 /// Comando senza le variabili dell'AppImage, che romperebbero i programmi di sistema.
-fn command(program: &str) -> Command {
+pub(crate) fn system_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(program);
     if std::env::var_os("APPIMAGE").is_some() {
         for var in ["LD_LIBRARY_PATH", "GIO_EXTRA_MODULES", "GTK_PATH", "GDK_PIXBUF_MODULE_FILE"] {
             cmd.env_remove(var);
         }
     }
+    cmd
+}
+
+/// Comando di sistema lanciato in silenzio, senza leggerne l'output.
+fn command(program: &str) -> Command {
+    let mut cmd = system_command(program);
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     cmd
 }
