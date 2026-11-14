@@ -36,6 +36,7 @@ export const SHORTCUTS: { group: string; items: { keys: string[]; label: string 
       { keys: ["B"], label: "Posticipa" },
       { keys: ["L"], label: "Etichetta" },
       { keys: ["U"], label: "Segna come non letto" },
+      { keys: ["I"], label: "Chiedi all'AI sulla conversazione" },
     ],
   },
   {

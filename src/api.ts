@@ -3,7 +3,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { demo } from "./demo";
-import type { Account, AccountPatch, Browser, Folder, Invite, SearchQuery, Unsubscribe, Guess, HtmlView, Mailbox, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
+import type { Account, AccountPatch, AiAgent, Browser, Folder, Invite, SearchQuery, Unsubscribe, Guess, HtmlView, Mailbox, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
 
 export const inTauri = isTauri();
 
@@ -161,6 +161,18 @@ export const api = {
   listBrowsers: (): Promise<Browser[]> => (inTauri ? invoke("list_browsers") : Promise.resolve([])),
 
   openLinkWith: (browser: string, url: string): Promise<void> => (inTauri ? invoke("open_link_with", { browser, url }) : Promise.resolve()),
+
+  /** Agenti AI installati sul computer. */
+  listAiAgents: (): Promise<AiAgent[]> =>
+    inTauri ? invoke("list_ai_agents") : Promise.resolve([{ id: "demo", name: "Agente di prova", path: "" }]),
+
+  /** Manda il testo all'agente e ne restituisce la risposta; `request` serve per `cancelAi`. */
+  askAi: (request: string, agent: string, prompt: string): Promise<string> =>
+    inTauri
+      ? invoke("ask_ai", { request, agent, prompt })
+      : new Promise((ok) => setTimeout(() => ok("Questa è una **risposta di prova**: nell’anteprima del browser gli agenti AI non sono disponibili."), 900)),
+
+  cancelAi: (request: string): Promise<void> => (inTauri ? invoke("cancel_ai", { request }) : Promise.resolve()),
 
   clearCache: (): Promise<void> => (inTauri ? invoke("clear_cache") : Promise.resolve()),
 
