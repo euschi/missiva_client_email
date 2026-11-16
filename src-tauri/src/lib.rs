@@ -578,6 +578,23 @@ async fn empty_trash(account: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// Segna come letta un'intera casella: di un account o, senza `account`, di tutti.
+/// Con `mailbox` è una cartella dell'utente; senza, la cartella speciale `folder`.
+#[tauri::command]
+async fn mark_all_read(account: Option<String>, folder: Folder, mailbox: Option<String>) -> Result<()> {
+    let bucket = mail::bucket(folder, mailbox.as_deref().unwrap_or_default());
+    for acc in accounts::load()?.into_iter().filter(|a| account.as_ref().is_none_or(|id| &a.id == id)) {
+        let auth = auth_for(&acc).await?;
+        let (mailbox, bucket) = (mailbox.clone(), bucket.clone());
+        blocking(move || {
+            imap_client::mark_all_read(&acc, &auth, folder, mailbox.as_deref())?;
+            mail::update_cache(&acc.id, &bucket, |msgs| msgs.iter_mut().for_each(|m| m.unread = false))
+        })
+        .await?;
+    }
+    Ok(())
+}
+
 /// Segna come spam: sposta i messaggi nella cartella Spam del loro account.
 #[tauri::command]
 async fn mark_spam(targets: Vec<MessageRef>) -> Result<()> {
@@ -1088,6 +1105,7 @@ pub fn run() {
             delete_draft,
             delete_forever,
             empty_trash,
+            mark_all_read,
             mark_spam,
             create_mailbox,
             rename_mailbox,

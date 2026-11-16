@@ -411,6 +411,23 @@ pub fn empty_trash(acc: &Account, auth: &Auth) -> Result<()> {
     Ok(())
 }
 
+/// Segna come letti tutti i messaggi di una casella, compresi quelli non scaricati.
+/// Senza `mailbox` usa la cartella speciale `folder` dell'account.
+pub fn mark_all_read(acc: &Account, auth: &Auth, folder: Folder, mailbox: Option<&str>) -> Result<()> {
+    let mut s = connect(acc, auth)?;
+    let path = match mailbox {
+        Some(m) => Some(m.to_string()),
+        None => resolve(&mut s, folder)?,
+    };
+    if let Some(path) = path {
+        if s.select(&path)?.exists > 0 {
+            s.store("1:*", "+FLAGS.SILENT (\\Seen)")?;
+        }
+    }
+    let _ = s.logout();
+    Ok(())
+}
+
 /// Scarica solo i messaggi nuovi: di quelli già in cache basta aggiornare letto e contrassegno.
 fn fetch_in(acc: &Account, mut s: Session, folder: Folder, mailbox: &str) -> Result<Vec<Message>> {
     let bucket = mail::bucket(folder, mailbox);

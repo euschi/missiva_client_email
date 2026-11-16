@@ -131,6 +131,10 @@ export const api = {
   /** Svuota il Cestino di un account, o di tutti. */
   emptyTrash: (account: string | null): Promise<void> => (inTauri ? invoke("empty_trash", { account }) : Promise.resolve()),
 
+  /** Segna come letta un'intera casella sul server: senza `account` su tutti, senza `mailbox` la cartella speciale. */
+  markAllRead: (account: string | null, folder: Folder, mailbox: string | null): Promise<void> =>
+    inTauri ? invoke("mark_all_read", { account, folder, mailbox }) : Promise.resolve(),
+
   sendMessage: (outgoing: Outgoing): Promise<void> => (inTauri ? invoke("send_message", { outgoing }) : demo.send(outgoing)),
 
   scheduleMessage: (outgoing: Outgoing, at: number): Promise<Scheduled> =>
