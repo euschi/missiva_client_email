@@ -42,6 +42,10 @@ interface Props {
   onCreateBox: (accountId: string, parent: Mailbox | null) => void;
   onRenameBox: (accountId: string, box: Mailbox) => void;
   onDeleteBox: (accountId: string, box: Mailbox) => void;
+  onMarkAllRead: (t: FolderTarget) => void;
+  onRefreshFolder: (t: FolderTarget) => void;
+  /** Svuota il Cestino di un account, o di tutti con `null`. */
+  onEmptyTrash: (accountId: string | null) => void;
   labels: Label[];
   labelCounts: Record<string, number>;
   labelFilter: string | null;
@@ -49,6 +53,42 @@ interface Props {
   onCompose: () => void;
   onAddAccount: () => void;
   onSettings: () => void;
+}
+
+/** Cartella delle azioni rapide: speciale (`mailbox` nullo) o dell'utente; senza account vale per tutti. */
+export interface FolderTarget {
+  accountId: string | null;
+  folder: Folder;
+  mailbox: Mailbox | null;
+  /** Nome leggibile, per gli avvisi. */
+  label: string;
+}
+
+/** Viste unificate che corrispondono a una cartella vera, e quindi hanno azioni rapide. */
+const REAL_FOLDERS: Folder[] = ["inbox", "drafts", "sent", "archive", "trash"];
+
+/** Azioni rapide comuni a tutte le cartelle (tasto destro): segna come letto, aggiorna, svuota il cestino. */
+function QuickActions({ target, close, p }: { target: FolderTarget; close: () => void; p: Props }) {
+  return (
+    <>
+      {target.folder !== "drafts" && (
+        <button type="button" className="pop-item" onClick={() => (close(), p.onMarkAllRead(target))}>
+          <span>Segna tutto come letto</span>
+          <Icon name="check" size={15} stroke={1.8} />
+        </button>
+      )}
+      <button type="button" className="pop-item" onClick={() => (close(), p.onRefreshFolder(target))}>
+        <span>Aggiorna</span>
+        <Icon name="sync" size={15} stroke={1.8} />
+      </button>
+      {target.folder === "trash" && !target.mailbox && (
+        <button type="button" className="pop-item" onClick={() => (close(), p.onEmptyTrash(target.accountId))}>
+          <span>Svuota il cestino…</span>
+          <Icon name="trash" size={15} stroke={1.8} />
+        </button>
+      )}
+    </>
+  );
 }
 
 /** Cartelle speciali su cui si può lasciare un messaggio trascinato. */
@@ -90,6 +130,7 @@ function Chevron({ open, label, onToggle }: { open: boolean; label: string; onTo
 
 export function Sidebar(p: Props) {
   const branches = useClosed();
+  const [viewMenu, setViewMenu] = useState<View | null>(null);
   const totalUnread = Object.values(p.unreadByAccount).reduce((a, b) => a + b, 0);
   const allOpen = branches.isOpen("all");
   const allLabel = p.accounts.length > 1 ? "Tutti gli account" : "Viste rapide";
@@ -134,20 +175,34 @@ export function Sidebar(p: Props) {
             </div>
             {allOpen && (
               <div className="tree-children">
-                {VIEWS.map((v) => (
-                  <button
-                    key={v.id}
-                    type="button"
-                    className="nav-item tree-item"
-                    data-drop-folder={DROPPABLE.includes(v.id as Folder) ? v.id : undefined}
-                    aria-current={!p.box && p.accountFilter === "all" && p.view === v.id}
-                    onClick={() => p.onView(v.id)}
-                  >
-                    <Icon name={v.icon} size={16} stroke={1.7} />
-                    <span className="label">{v.label}</span>
-                    <span className="count">{show(p.counts[v.id])}</span>
-                  </button>
-                ))}
+                {VIEWS.map((v) => {
+                  const real = REAL_FOLDERS.includes(v.id as Folder);
+                  const close = () => setViewMenu(null);
+                  return (
+                    <div key={v.id} className="tree-line">
+                      {viewMenu === v.id && (
+                        <Popover label={`Azioni per ${v.label}`} onClose={close} placement={["end"]}>
+                          <QuickActions p={p} close={close} target={{ accountId: null, folder: v.id as Folder, mailbox: null, label: `${v.label} (tutti gli account)` }} />
+                        </Popover>
+                      )}
+                      <button
+                        type="button"
+                        className="nav-item tree-item"
+                        data-drop-folder={DROPPABLE.includes(v.id as Folder) ? v.id : undefined}
+                        aria-current={!p.box && p.accountFilter === "all" && p.view === v.id}
+                        onClick={() => p.onView(v.id)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          if (real) setViewMenu(v.id);
+                        }}
+                      >
+                        <Icon name={v.icon} size={16} stroke={1.7} />
+                        <span className="label">{v.label}</span>
+                        <span className="count">{show(p.counts[v.id])}</span>
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -339,6 +394,10 @@ function AccountList(p: Props & { branches: Branches }) {
                   <span>Rinomina</span>
                   <span className="pop-hint">F2</span>
                 </button>
+                <button type="button" className="pop-item" onClick={() => (close(), p.onMarkAllRead({ accountId: a.id, folder: "inbox", mailbox: null, label: `Posta in arrivo di ${a.name}` }))}>
+                  <span>Segna tutto come letto</span>
+                  <Icon name="check" size={15} stroke={1.8} />
+                </button>
                 <button type="button" className="pop-item" onClick={() => (close(), p.onCreateBox(a.id, null))}>
                   <span>Nuova cartella</span>
                   <Icon name="folder" size={15} stroke={1.8} />
@@ -465,7 +524,19 @@ function FolderTree(p: Props & { branches: Branches; account: Account }) {
           <div className="tree-line" style={{ paddingLeft: depth * 14 }}>
             {menuFor === m.path && (
               <Popover label={`Azioni per ${m.name}`} onClose={() => setMenuFor(null)} placement={["end"]}>
-                <button type="button" className="pop-item" onClick={() => (setMenuFor(null), p.onCreateBox(a.id, m))}>
+                {m.selectable && (
+                  <QuickActions
+                    p={p}
+                    close={() => setMenuFor(null)}
+                    target={{
+                      accountId: a.id,
+                      folder: m.special ?? "other",
+                      mailbox: m.special ? null : m,
+                      label: `${special?.label ?? m.label} di ${a.name}`,
+                    }}
+                  />
+                )}
+                <button type="button" className={m.selectable ? "pop-item gap" : "pop-item"} onClick={() => (setMenuFor(null), p.onCreateBox(a.id, m))}>
                   <span>Nuova sottocartella</span>
                 </button>
                 {!m.special && m.selectable && (

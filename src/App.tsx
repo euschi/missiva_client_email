@@ -12,7 +12,7 @@ import { nextLabelColor } from "./components/Pickers";
 import { Preview } from "./components/Preview";
 import { Reader, type ReaderMenu } from "./components/Reader";
 import { Settings, type Section } from "./components/Settings";
-import { Sidebar, VIEWS, type View } from "./components/Sidebar";
+import { Sidebar, VIEWS, type FolderTarget, type View } from "./components/Sidebar";
 import { TitleBar } from "./components/TitleBar";
 import { longTime, plural, relativeSync } from "./format";
 import { Icon } from "./icons";
@@ -665,8 +665,7 @@ export function App() {
     });
   };
 
-  const askEmptyTrash = () => {
-    const account = accountFilter === "all" ? null : accountFilter;
+  const askEmptyTrash = (account: string | null = accountFilter === "all" ? null : accountFilter) => {
     setModal({
       kind: "confirm",
       title: "Svuotare il cestino?",
@@ -686,6 +685,29 @@ export function App() {
           });
       },
     });
+  };
+
+  /** Riscarica dal server una cartella, di un account o di tutti. */
+  const refreshFolder = (t: FolderTarget) =>
+    t.mailbox && t.accountId ? syncBox({ accountId: t.accountId, mailbox: t.mailbox }) : sync(t.folder, t.accountId ?? undefined);
+
+  /** Segna come letta un'intera cartella sul server, anche i messaggi non ancora scaricati. */
+  const markAllRead = (t: FolderTarget) => {
+    const inside = (m: Message) =>
+      !m.scheduled &&
+      (!t.accountId || m.accountId === t.accountId) &&
+      (t.mailbox ? m.folder === "other" && m.mailbox === t.mailbox.path : m.folder === t.folder);
+    setByFolder((all) =>
+      Object.fromEntries(Object.entries(all).map(([k, list]) => [k, list?.map((m) => (m.unread && inside(m) ? { ...m, unread: false } : m))])),
+    );
+    api
+      .markAllRead(t.accountId, t.folder, t.mailbox?.path ?? null)
+      .then(() => notify(`${t.label}: tutto segnato come letto`))
+      .catch((e) => {
+        notify(errorText(e), true);
+        // Lo stato vero lo dice il server: alcuni account potrebbero esserci riusciti.
+        refreshFolder(t);
+      });
   };
 
   /** Nel Cestino elimina per sempre, altrove sposta nel Cestino. */
@@ -1525,6 +1547,9 @@ export function App() {
           onCreateBox={createBox}
           onRenameBox={renameBox}
           onDeleteBox={deleteBox}
+          onMarkAllRead={markAllRead}
+          onRefreshFolder={refreshFolder}
+          onEmptyTrash={askEmptyTrash}
           labels={labels.defs}
           labelCounts={labelCounts}
           labelFilter={labelFilter}
@@ -1563,7 +1588,7 @@ export function App() {
                 : { label: "Cerca su tutta la posta del server (Invio)", busy: false, run: searchOnServer }
           }
           older={canLoadOlder && !olderDone.includes(listKey) ? { busy: olderBusy, run: loadOlder } : null}
-          onEmptyTrash={!box && view === "trash" ? askEmptyTrash : null}
+          onEmptyTrash={!box && view === "trash" ? () => askEmptyTrash() : null}
           rowMenu={rowMenu}
           dragCount={(m) => groupOf(m).length}
           onDrop={dropOn}
