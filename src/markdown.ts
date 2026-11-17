@@ -13,6 +13,12 @@ function inline(s: string): string {
   return esc(s).replace(LINK, '<a href="$2">$1</a>').replace(BOLD, "<strong>$1</strong>").replace(ITALIC, "$1<em>$2</em>");
 }
 
+/** Il rientro a inizio riga resta visibile anche in HTML, che altrimenti lo comprime. */
+function indented(line: string): string {
+  const lead = line.match(/^[ \t]*/)![0];
+  return lead.replace(/\t/g, "    ").replace(/ /g, "&nbsp;") + inline(line.slice(lead.length));
+}
+
 export function toHtml(text: string): string {
   const lines = text.split("\n");
   const out: string[] = [];
@@ -30,7 +36,7 @@ export function toHtml(text: string): string {
       i++;
     } else {
       const para: string[] = [];
-      while (i < lines.length && lines[i].trim() && !QUOTE.test(lines[i]) && !LIST.test(lines[i])) para.push(inline(lines[i++]));
+      while (i < lines.length && lines[i].trim() && !QUOTE.test(lines[i]) && !LIST.test(lines[i])) para.push(indented(lines[i++]));
       out.push(`<p>${para.join("<br>")}</p>`);
     }
   }
