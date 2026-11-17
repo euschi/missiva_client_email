@@ -23,7 +23,8 @@ Missiva comunica solo con:
 - i server del tuo provider di posta (IMAP e SMTP);
 - i servizi di accesso di Google (`accounts.google.com`, `oauth2.googleapis.com`) e Microsoft (`login.microsoftonline.com`), solo per l'accesso OAuth e il rinnovo dei token;
 - `autoconfig.thunderbird.net` e il dominio della tua email, per suggerire le impostazioni di un account IMAP (viene inviato solo il dominio, non l'indirizzo completo né la password);
-- i siti indicati in un messaggio, solo quando lo chiedi tu: aprendo un link, mostrando le immagini remote (bloccate di default) o usando la disiscrizione da una newsletter.
+- i siti indicati in un messaggio, solo quando lo chiedi tu: aprendo un link, mostrando le immagini remote (bloccate di default) o usando la disiscrizione da una newsletter;
+- i server MCP che configuri tu, solo quando esegui un'azione su un messaggio: ricevono soltanto i dati dell'email che hai inserito negli argomenti dello strumento.
 
 ## Dati Google
 

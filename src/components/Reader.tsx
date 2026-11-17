@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { fileSize, initials, longTime, monoOf, paragraphs, plural, providerLabel } from "../format";
 import { Icon } from "../icons";
+import type { McpAction } from "../mcp";
 import type { Label } from "../store";
 import type { Account, Attachment, Folder, HtmlView, Invite, Mailbox, Message, Scheduled, Unsubscribe } from "../types";
 import { MailFrame } from "./MailFrame";
@@ -34,6 +35,10 @@ interface Props {
   onExport: (m: Message) => void;
   /** Manda la conversazione a un agente AI installato. */
   onAskAi: (m: Message) => void;
+  /** Azioni rapide MCP salvate. */
+  mcpActions: McpAction[];
+  /** Apre le azioni MCP sul messaggio; con `action` la esegue subito. */
+  onMcp: (m: Message, action?: McpAction) => void;
   onSaveAttachment: (m: Message, file: Attachment) => void;
   onSaveAll: (m: Message, files: Attachment[]) => void;
   onUnsubscribe: (m: Message, info: Unsubscribe) => void;
@@ -161,6 +166,14 @@ export function Reader(p: Props) {
                     <span className="label-name"><Icon name="sparkle" size={15} stroke={1.8} />Chiedi all’AI…</span>
                     <kbd>I</kbd>
                   </button>
+                  <button type="button" className="pop-item" onClick={() => (close(), p.onMcp(m))}>
+                    <span className="label-name"><Icon name="plug" size={15} stroke={1.8} />Azioni MCP…</span>
+                  </button>
+                  {p.mcpActions.map((a) => (
+                    <button key={a.id} type="button" className="pop-item" onClick={() => (close(), p.onMcp(m, a))}>
+                      <span className="label-name mcp-quick"><Icon name="plug" size={15} stroke={1.8} />{a.name}</span>
+                    </button>
+                  ))}
                   <button type="button" className="pop-item" onClick={() => (close(), p.onSpam(m))}>
                     <span className="label-name"><Icon name="ban" size={15} stroke={1.8} />Segnala come spam</span>
                   </button>

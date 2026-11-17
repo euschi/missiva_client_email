@@ -50,7 +50,7 @@ export const LABEL_COLORS = ["#C9F26B", "#FFB86B", "#8FD3FF", "#C7B5FF", "#FF8F7
 export const keyOf = (m: Message) => m.messageId ?? m.id;
 
 /** Stato salvato in un archivio JSON del backend; finché non è caricato vale `initial`. */
-export function useStore<T>(name: "snoozed" | "labels" | "trusted" | "rules" | "templates", initial: T): [T, (next: T) => void] {
+export function useStore<T>(name: "snoozed" | "labels" | "trusted" | "rules" | "templates" | "mcp_actions", initial: T): [T, (next: T) => void] {
   const [value, setValue] = useState<T>(initial);
   useEffect(() => {
     api.readStore(name).then((v) => v != null && setValue(Array.isArray(initial) ? (v as T) : { ...initial, ...(v as T) }), () => {});
