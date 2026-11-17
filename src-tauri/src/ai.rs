@@ -43,7 +43,7 @@ const KNOWN: &[Known] = &[
 
 /// Cartelle in cui cercare i programmi: il PATH e quelle dove gli installatori li mettono spesso,
 /// che mancano dal PATH quando l'app parte dal menu invece che da un terminale.
-fn search_dirs() -> Vec<PathBuf> {
+pub(crate) fn search_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     if let Some(home) = dirs::home_dir() {
         for sub in [".local/bin", ".npm-global/bin", ".vfox/sdks/nodejs/bin", ".bun/bin", ".volta/bin", ".claude/local", ".local/share/pnpm", ".cargo/bin"] {
@@ -62,7 +62,7 @@ fn search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn find_in(dirs: &[PathBuf], binary: &str) -> Option<PathBuf> {
+pub(crate) fn find_in(dirs: &[PathBuf], binary: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     dirs.iter()
         .map(|d| d.join(binary))
@@ -126,7 +126,7 @@ fn collect(stream: Option<impl Read + Send + 'static>) -> std::thread::JoinHandl
 }
 
 /// Ultime righe non vuote, per spiegare cosa è andato storto.
-fn tail(text: &str, lines: usize) -> String {
+pub(crate) fn tail(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     all[all.len().saturating_sub(lines)..].join("\n")
 }
