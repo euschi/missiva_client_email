@@ -7,6 +7,7 @@ mod calendar;
 mod error;
 mod imap_client;
 mod mail;
+mod mcp;
 mod oauth;
 mod outbox;
 mod secrets;
@@ -827,6 +828,38 @@ fn cancel_ai(request: String) {
     ai::cancel(&request);
 }
 
+/// Collegamenti MCP configurati, con i loro segreti (servono al modulo di modifica).
+#[tauri::command]
+fn mcp_servers() -> Result<Vec<mcp::Server>> {
+    mcp::list()
+}
+
+#[tauri::command]
+fn mcp_save_server(server: mcp::Server) -> Result<mcp::Server> {
+    mcp::save(server)
+}
+
+#[tauri::command]
+fn mcp_remove_server(id: String) -> Result<()> {
+    mcp::remove(&id)
+}
+
+/// Strumenti di un server; `request` serve ad annullare con `mcp_cancel`.
+#[tauri::command]
+async fn mcp_list_tools(request: String, server: String) -> Result<Vec<mcp::Tool>> {
+    mcp::list_tools(&request, &server).await
+}
+
+#[tauri::command]
+async fn mcp_call_tool(request: String, server: String, tool: String, args: serde_json::Value) -> Result<serde_json::Value> {
+    mcp::call_tool(&request, &server, &tool, args).await
+}
+
+#[tauri::command]
+fn mcp_cancel(request: String) {
+    mcp::cancel(&request);
+}
+
 async fn deliver(outgoing: smtp::Outgoing) -> Result<()> {
     if outgoing.to.is_empty() {
         return Err(msg("Aggiungi almeno un destinatario"));
@@ -950,7 +983,7 @@ async fn flush_outbox(handle: &AppHandle) -> Vec<(String, Option<String>)> {
 }
 
 /// File JSON condivisi con il frontend (posticipi, etichette, regole, modelli…) in ~/.config/missiva/.
-const STORES: [&str; 5] = ["snoozed", "labels", "trusted", "rules", "templates"];
+const STORES: [&str; 6] = ["snoozed", "labels", "trusted", "rules", "templates", "mcp_actions"];
 
 fn store_path(name: &str) -> Result<std::path::PathBuf> {
     if !STORES.contains(&name) {
@@ -1129,6 +1162,12 @@ pub fn run() {
             list_ai_agents,
             ask_ai,
             cancel_ai,
+            mcp_servers,
+            mcp_save_server,
+            mcp_remove_server,
+            mcp_list_tools,
+            mcp_call_tool,
+            mcp_cancel,
             set_flags_many,
             send_message,
             schedule_message,

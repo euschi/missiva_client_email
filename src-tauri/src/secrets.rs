@@ -45,8 +45,13 @@ fn retry<T>(mut op: impl FnMut() -> keyring::Result<T>) -> keyring::Result<T> {
 }
 
 pub fn store(account_id: &str, secret: &Secret) -> Result<()> {
-    let entry = entry(account_id)?;
-    let value = serde_json::to_string(secret)?;
+    store_raw(account_id, &serde_json::to_string(secret)?)
+}
+
+/// Salva un testo qualsiasi sotto `key` (es. i segreti dei collegamenti MCP).
+pub fn store_raw(key: &str, value: &str) -> Result<()> {
+    let entry = entry(key)?;
+    let value = value.to_string();
     // Dopo un timeout la scrittura può essere andata a buon fine: se il valore c'è già, basta così.
     retry(|| match entry.set_password(&value) {
         Err(keyring::Error::PlatformFailure(e)) => match entry.get_password() {
@@ -59,8 +64,12 @@ pub fn store(account_id: &str, secret: &Secret) -> Result<()> {
 }
 
 pub fn load(account_id: &str) -> Result<Secret> {
-    let entry = entry(account_id)?;
-    Ok(serde_json::from_str(&retry(|| entry.get_password())?)?)
+    Ok(serde_json::from_str(&load_raw(account_id)?)?)
+}
+
+pub fn load_raw(key: &str) -> Result<String> {
+    let entry = entry(key)?;
+    Ok(retry(|| entry.get_password())?)
 }
 
 pub fn delete(account_id: &str) -> Result<()> {

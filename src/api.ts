@@ -3,7 +3,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { demo } from "./demo";
-import type { Account, AccountPatch, AiAgent, Browser, Folder, Invite, SearchQuery, Unsubscribe, Guess, HtmlView, Mailbox, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
+import type { Account, AccountPatch, AiAgent, McpResult, McpServer, McpTool, Browser, Folder, Invite, SearchQuery, Unsubscribe, Guess, HtmlView, Mailbox, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
 
 export const inTauri = isTauri();
 
@@ -177,6 +177,24 @@ export const api = {
       : new Promise((ok) => setTimeout(() => ok("Questa è una **risposta di prova**: nell’anteprima del browser gli agenti AI non sono disponibili."), 900)),
 
   cancelAi: (request: string): Promise<void> => (inTauri ? invoke("cancel_ai", { request }) : Promise.resolve()),
+
+  /** Collegamenti MCP configurati. */
+  mcpServers: (): Promise<McpServer[]> => (inTauri ? invoke("mcp_servers") : Promise.resolve([])),
+
+  /** Aggiunge o aggiorna (stesso id) un collegamento MCP. */
+  mcpSaveServer: (server: McpServer): Promise<McpServer> =>
+    inTauri ? invoke("mcp_save_server", { server }) : Promise.reject("Nell’anteprima del browser i collegamenti MCP non sono disponibili."),
+
+  mcpRemoveServer: (id: string): Promise<void> => (inTauri ? invoke("mcp_remove_server", { id }) : Promise.resolve()),
+
+  /** Strumenti del server; `request` serve per `mcpCancel`. */
+  mcpListTools: (request: string, server: string): Promise<McpTool[]> =>
+    inTauri ? invoke("mcp_list_tools", { request, server }) : Promise.reject("Nell’anteprima del browser i collegamenti MCP non sono disponibili."),
+
+  mcpCallTool: (request: string, server: string, tool: string, args: Record<string, unknown>): Promise<McpResult> =>
+    inTauri ? invoke("mcp_call_tool", { request, server, tool, args }) : Promise.reject("Nell’anteprima del browser i collegamenti MCP non sono disponibili."),
+
+  mcpCancel: (request: string): Promise<void> => (inTauri ? invoke("mcp_cancel", { request }) : Promise.resolve()),
 
   clearCache: (): Promise<void> => (inTauri ? invoke("clear_cache") : Promise.resolve()),
 

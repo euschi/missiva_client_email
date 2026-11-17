@@ -4,12 +4,13 @@ import { monoOf, plural } from "../format";
 import { Icon, type IconName } from "../icons";
 import { notificationsAllowed, notifyTest } from "../notify";
 import { SHORTCUTS } from "../shortcuts";
+import { forgetTools, joinCommand, pairsText, parsePairs, parseServersJson, splitCommand, type McpAction } from "../mcp";
 import { LABEL_COLORS, type Labels, type Rule } from "../store";
 import { PRESETS, accentOf, inkFor, isHex, type Density, type Prefs, type Reader } from "../prefs";
-import type { Account, AccountPatch, Mailbox } from "../types";
+import type { Account, AccountPatch, Mailbox, McpServer } from "../types";
 import { CloseButton, Modal } from "./Modal";
 
-export type Section = "accounts" | "look" | "mail" | "rules" | "labels" | "notifications" | "tray" | "shortcuts" | "privacy";
+export type Section = "accounts" | "look" | "mail" | "rules" | "labels" | "notifications" | "tray" | "shortcuts" | "privacy" | "mcp";
 
 const SECTIONS: { id: Section; label: string; icon: IconName }[] = [
   { id: "accounts", label: "Account", icon: "user" },
@@ -17,6 +18,7 @@ const SECTIONS: { id: Section; label: string; icon: IconName }[] = [
   { id: "mail", label: "Invio e posta", icon: "send" },
   { id: "rules", label: "Regole", icon: "filter" },
   { id: "labels", label: "Etichette", icon: "tag" },
+  { id: "mcp", label: "Collegamenti MCP", icon: "plug" },
   { id: "notifications", label: "Notifiche", icon: "bell" },
   { id: "tray", label: "Area di notifica", icon: "tray" },
   { id: "shortcuts", label: "Scorciatoie", icon: "keys" },
@@ -41,6 +43,8 @@ interface Props {
   /** Regola da completare, proposta dal menu di un messaggio. */
   ruleDraft?: Partial<Rule>;
   mailboxes: Record<string, Mailbox[]>;
+  mcpActions: McpAction[];
+  onMcpActions: (a: McpAction[]) => void;
   onClearCache: () => Promise<void>;
   onClose: () => void;
 }
@@ -68,6 +72,7 @@ export function Settings(p: Props) {
           {section === "mail" && <MailSection prefs={p.prefs} onPrefs={p.onPrefs} />}
           {section === "rules" && <RulesSection rules={p.rules} onRules={p.onRules} labels={p.labels} accounts={p.accounts} mailboxes={p.mailboxes} draft={p.ruleDraft} />}
           {section === "labels" && <LabelsSection labels={p.labels} onLabels={p.onLabels} />}
+          {section === "mcp" && <McpSection actions={p.mcpActions} onActions={p.onMcpActions} />}
           {section === "notifications" && <Notifications prefs={p.prefs} onPrefs={p.onPrefs} />}
           {section === "tray" && <Tray prefs={p.prefs} onPrefs={p.onPrefs} available={p.trayAvailable} />}
           {section === "shortcuts" && <Shortcuts />}
@@ -713,6 +718,274 @@ function RulesSection({ rules, onRules, labels, accounts, mailboxes, draft }: { 
           </button>
         </div>
       </form>
+    </>
+  );
+}
+
+interface ServerDraft {
+  id: string;
+  name: string;
+  transport: McpServer["transport"];
+  /** Programma e argomenti in una riga, come nel terminale. */
+  commandLine: string;
+  url: string;
+  envText: string;
+  headersText: string;
+}
+
+const NEW_SERVER: ServerDraft = { id: "", name: "", transport: "stdio", commandLine: "", url: "", envText: "", headersText: "" };
+
+const toDraft = (s: McpServer): ServerDraft => ({
+  id: s.id,
+  name: s.name,
+  transport: s.transport,
+  commandLine: s.command ? joinCommand([s.command, ...s.args]) : "",
+  url: s.url,
+  envText: pairsText(s.env, "="),
+  headersText: pairsText(s.headers, ": "),
+});
+
+function fromDraft(d: ServerDraft): McpServer {
+  const [command = "", ...args] = splitCommand(d.commandLine);
+  const stdio = d.transport === "stdio";
+  return {
+    id: d.id,
+    name: d.name.trim(),
+    transport: d.transport,
+    command: stdio ? command : "",
+    args: stdio ? args : [],
+    url: stdio ? "" : d.url.trim(),
+    env: stdio ? parsePairs(d.envText, "=") : {},
+    headers: stdio ? {} : parsePairs(d.headersText, ":"),
+  };
+}
+
+/** Esito della prova di un collegamento: numero di strumenti o errore. */
+type Check = { busy: true } | { busy: false; ok: boolean; text: string };
+
+function McpSection({ actions, onActions }: { actions: McpAction[]; onActions: (a: McpAction[]) => void }) {
+  const [servers, setServers] = useState<McpServer[] | null>(null);
+  const [draft, setDraft] = useState<ServerDraft | null>(null);
+  const [checks, setChecks] = useState<Record<string, Check>>({});
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [importText, setImportText] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+
+  const reload = () =>
+    api
+      .mcpServers()
+      .then(setServers)
+      .catch((e) => (setServers([]), setError(errorText(e))));
+  useEffect(() => void reload(), []);
+
+  /** Prova il collegamento chiedendo l'elenco degli strumenti. */
+  const check = async (id: string) => {
+    setChecks((c) => ({ ...c, [id]: { busy: true } }));
+    forgetTools(id);
+    try {
+      const tools = await api.mcpListTools(crypto.randomUUID(), id);
+      setChecks((c) => ({ ...c, [id]: { busy: false, ok: true, text: plural(tools.length, "strumento", "strumenti") } }));
+    } catch (e) {
+      setChecks((c) => ({ ...c, [id]: { busy: false, ok: false, text: errorText(e) } }));
+    }
+  };
+
+  const save = async () => {
+    if (!draft) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await api.mcpSaveServer(fromDraft(draft));
+      setDraft(null);
+      await reload();
+      void check(saved.id);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (id: string) => {
+    setConfirmDelete(null);
+    try {
+      await api.mcpRemoveServer(id);
+      forgetTools(id);
+      onActions(actions.filter((a) => a.serverId !== id));
+      await reload();
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+
+  const importJson = async () => {
+    if (importText === null) return;
+    setError(null);
+    try {
+      const found = parseServersJson(importText);
+      const saved: McpServer[] = [];
+      for (const s of found) saved.push(await api.mcpSaveServer(s));
+      setImportText(null);
+      await reload();
+      saved.forEach((s) => void check(s.id));
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+
+  const describe = (s: McpServer) => (s.transport === "http" ? s.url : joinCommand([s.command, ...s.args]));
+  const serverName = (id: string) => servers?.find((s) => s.id === id)?.name ?? "collegamento eliminato";
+  const set = (patch: Partial<ServerDraft>) => draft && setDraft({ ...draft, ...patch });
+
+  return (
+    <>
+      <Head
+        title="Collegamenti MCP"
+        text="Server Model Context Protocol da usare sulle email: dal menu «Altre azioni» di un messaggio scegli uno strumento, riempi i campi con i dati dell’email ed eseguilo. Variabili e header restano nel portachiavi di sistema."
+      />
+      {servers && servers.length > 0 && (
+        <div className="settings-list">
+          {servers.map((s) => {
+            const c = checks[s.id];
+            const related = actions.filter((a) => a.serverId === s.id).length;
+            return (
+              <div key={s.id} className="setting-row mcp-server-row">
+                <Icon name={s.transport === "http" ? "link" : "plug"} size={16} stroke={1.8} />
+                <span className="setting-text">
+                  <span className="mcp-server-name">{s.name}</span>
+                  <span className="mcp-server-detail">{describe(s)}</span>
+                  {c && (c.busy ? <span className="mcp-server-detail">Provo il collegamento…</span> : <span className={c.ok ? "mcp-server-ok" : "link-error mcp-error"}>{c.text}</span>)}
+                </span>
+                {confirmDelete === s.id ? (
+                  <>
+                    <button type="button" className="btn btn-soft btn-sm" onClick={() => setConfirmDelete(null)}>
+                      Annulla
+                    </button>
+                    <button type="button" className="btn btn-danger btn-sm" onClick={() => remove(s.id)}>
+                      Elimina{related ? ` (e ${plural(related, "azione", "azioni")})` : ""}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button type="button" className="link-btn" disabled={c?.busy} onClick={() => check(s.id)}>
+                      Prova
+                    </button>
+                    <button type="button" className="icon-btn" aria-label={`Modifica ${s.name}`} title="Modifica" onClick={() => (setError(null), setDraft(toDraft(s)))}>
+                      <Icon name="pen" size={15} stroke={1.8} />
+                    </button>
+                    <button type="button" className="icon-btn" aria-label={`Elimina ${s.name}`} title="Elimina" onClick={() => setConfirmDelete(s.id)}>
+                      <Icon name="trash" size={15} stroke={1.8} />
+                    </button>
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {servers?.length === 0 && !draft && <p className="setting-desc">Nessun collegamento ancora.</p>}
+
+      {draft ? (
+        <form className="rule-form" onSubmit={(e) => (e.preventDefault(), void save())}>
+          <span className="setting-title">{draft.id ? "Modifica collegamento" : "Nuovo collegamento"}</span>
+          <div className="grid-2">
+            <label className="field">
+              <span>Nome</span>
+              <input className="input" value={draft.name} autoFocus placeholder="es. Task, Notion, Calendario" onChange={(e) => set({ name: e.target.value })} />
+            </label>
+            <label className="field">
+              <span>Tipo</span>
+              <select className="input" value={draft.transport} onChange={(e) => set({ transport: e.target.value as McpServer["transport"] })}>
+                <option value="stdio">Programma locale (stdio)</option>
+                <option value="http">Server remoto (URL)</option>
+              </select>
+            </label>
+          </div>
+          {draft.transport === "stdio" ? (
+            <>
+              <label className="field">
+                <span>Comando</span>
+                <input className="input mono" value={draft.commandLine} placeholder="npx -y @modelcontextprotocol/server-filesystem /home/io/Documenti" onChange={(e) => set({ commandLine: e.target.value })} />
+              </label>
+              <label className="field">
+                <span>Variabili d’ambiente (una per riga, NOME=valore)</span>
+                <textarea className="input mono" rows={3} value={draft.envText} placeholder="API_KEY=…" onChange={(e) => set({ envText: e.target.value })} />
+              </label>
+            </>
+          ) : (
+            <>
+              <label className="field">
+                <span>URL</span>
+                <input className="input mono" value={draft.url} placeholder="https://esempio.it/mcp" onChange={(e) => set({ url: e.target.value })} />
+              </label>
+              <label className="field">
+                <span>Header (uno per riga, Nome: valore)</span>
+                <textarea className="input mono" rows={3} value={draft.headersText} placeholder="Authorization: Bearer …" onChange={(e) => set({ headersText: e.target.value })} />
+              </label>
+            </>
+          )}
+          {error && <p className="link-error">{error}</p>}
+          <div className="mcp-form-actions">
+            <button type="button" className="btn btn-soft btn-sm" onClick={() => (setDraft(null), setError(null))}>
+              Annulla
+            </button>
+            <button type="submit" className="btn btn-primary btn-sm" disabled={saving || !draft.name.trim() || (draft.transport === "stdio" ? !draft.commandLine.trim() : !draft.url.trim())}>
+              {saving ? "Salvo…" : "Salva e prova"}
+            </button>
+          </div>
+        </form>
+      ) : importText !== null ? (
+        <form className="rule-form" onSubmit={(e) => (e.preventDefault(), void importJson())}>
+          <span className="setting-title">Importa da JSON</span>
+          <label className="field">
+            <span>Incolla la configurazione di Claude Desktop, Cursor o VS Code (con «mcpServers» o «servers»)</span>
+            <textarea className="input mono" rows={8} autoFocus value={importText} placeholder={'{\n  "mcpServers": {\n    "nome": { "command": "npx", "args": ["-y", "pacchetto"] }\n  }\n}'} onChange={(e) => setImportText(e.target.value)} />
+          </label>
+          {error && <p className="link-error">{error}</p>}
+          <div className="mcp-form-actions">
+            <button type="button" className="btn btn-soft btn-sm" onClick={() => (setImportText(null), setError(null))}>
+              Annulla
+            </button>
+            <button type="submit" className="btn btn-primary btn-sm" disabled={!importText.trim()}>
+              Importa
+            </button>
+          </div>
+        </form>
+      ) : (
+        <div className="mcp-form-actions start">
+          <button type="button" className="btn btn-soft btn-sm" onClick={() => (setError(null), setDraft(NEW_SERVER))}>
+            <Icon name="plus" size={14} stroke={2} />
+            Aggiungi collegamento
+          </button>
+          <button type="button" className="link-btn" onClick={() => (setError(null), setImportText(""))}>
+            Importa da JSON…
+          </button>
+          {error && <p className="link-error">{error}</p>}
+        </div>
+      )}
+
+      <div className="stack-10 mcp-actions-block">
+        <span className="setting-title">Azioni rapide</span>
+        <span className="setting-desc">Le salvi dalla finestra «Azioni MCP» di un messaggio: compaiono nel menu «Altre azioni» e nel menu del tasto destro, e partono con un clic.</span>
+        {actions.length > 0 && (
+          <div className="settings-list">
+            {actions.map((a) => (
+              <div key={a.id} className="setting-row">
+                <span className="setting-text">
+                  <span className="mcp-server-name">{a.name}</span>
+                  <span className="mcp-server-detail">
+                    {serverName(a.serverId)} · {a.tool}
+                  </span>
+                </span>
+                <button type="button" className="icon-btn" aria-label={`Elimina l’azione ${a.name}`} title="Elimina" onClick={() => onActions(actions.filter((x) => x.id !== a.id))}>
+                  <Icon name="trash" size={15} stroke={1.8} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </>
   );
 }

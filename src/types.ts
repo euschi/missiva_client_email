@@ -64,6 +64,47 @@ export interface AiAgent {
   path: string;
 }
 
+/** Collegamento a un server MCP: un programma locale (stdio) o un URL remoto (Streamable HTTP). */
+export interface McpServer {
+  /** Vuoto per un collegamento nuovo: lo assegna il backend. */
+  id: string;
+  name: string;
+  transport: "stdio" | "http";
+  command: string;
+  args: string[];
+  url: string;
+  /** Variabili d'ambiente e header: salvati nel portachiavi. */
+  env: Record<string, string>;
+  headers: Record<string, string>;
+}
+
+/** Strumento esposto da un server MCP. */
+export interface McpTool {
+  name: string;
+  title?: string;
+  description?: string;
+  /** JSON Schema degli argomenti. */
+  inputSchema: JsonSchema;
+}
+
+export interface JsonSchema {
+  type?: string | string[];
+  description?: string;
+  title?: string;
+  enum?: unknown[];
+  default?: unknown;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  [key: string]: unknown;
+}
+
+/** Risultato di `tools/call`, come lo manda il server. */
+export interface McpResult {
+  content?: { type: string; text?: string; data?: string; mimeType?: string; uri?: string; name?: string; resource?: { uri?: string; text?: string; mimeType?: string } }[];
+  structuredContent?: unknown;
+  isError?: boolean;
+}
+
 export interface Mailbox {
   /** Nome IMAP esatto, da usare con il server. */
   path: string;

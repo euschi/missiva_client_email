@@ -1026,3 +1026,32 @@ textarea.input { height: auto; padding: 10px 12px; line-height: 1.5; resize: ver
   .titlebar, .sidebar, .list, .reader-bar, .quick-reply, .toast, .overlay, .link-status, .remote-note, .thread-bar, .snooze-note, .invite-actions, .attach-save, .recv-chip { display: none !important; }
   .paper { box-shadow: none !important; border-radius: 0 !important; }
 }
+
+/* ---------- Collegamenti e azioni MCP ---------- */
+
+.mcp-run .ask-ai-log { gap: 14px; }
+.mcp-links { display: flex; align-items: center; min-height: 20px; margin-top: -6px; }
+.mcp-desc { font-size: 13px; color: var(--text-4); white-space: pre-wrap; }
+.mcp-fields { display: flex; flex-direction: column; gap: 14px; }
+.mcp-label { font-size: 12px; color: var(--text-4); }
+.mcp-required { color: var(--accent); }
+.mcp-hint { margin-left: 8px; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-6); }
+.mcp-field-desc { font-size: 12px; line-height: 1.45; color: var(--text-5); }
+.mcp-placeholders { display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--text-5); }
+.mcp-placeholders .chip { font-family: var(--font-mono); font-size: 11.5px; }
+.mcp-result { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: 12px; background: var(--fill); color: var(--text-2); font-size: 13px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; max-height: 360px; overflow-y: auto; }
+.mcp-result.error { box-shadow: inset 0 0 0 1px var(--danger); }
+.mcp-result.error strong { color: var(--danger); }
+.mcp-result img { max-width: 100%; border-radius: 8px; }
+.mcp-error { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; }
+.mcp-save { display: inline-flex; align-items: center; gap: 6px; }
+.mcp-save-row { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.mcp-save-row .input { max-width: 260px; }
+.mcp-server-row .link-btn { margin-left: 0; }
+.mcp-server-name { font-weight: 600; }
+.mcp-server-detail { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-5); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.mcp-server-ok { font-size: 12px; color: var(--accent); }
+.mcp-form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.mcp-form-actions.start { justify-content: flex-start; margin-top: 14px; }
+.mcp-actions-block { margin-top: 28px; }
+.mcp-quick { padding-left: 14px; }

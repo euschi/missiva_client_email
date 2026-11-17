@@ -6,6 +6,8 @@ import { AddAccount } from "./components/AddAccount";
 import { Compose } from "./components/Compose";
 import { Confirm, Prompt } from "./components/Modal";
 import { AskAi } from "./components/AskAi";
+import { McpRun } from "./components/McpRun";
+import type { McpAction } from "./mcp";
 import { LinkChooser } from "./components/LinkChooser";
 import { MessageList, type Chip, type DropTarget, type RowMenuItem } from "./components/MessageList";
 import { nextLabelColor } from "./components/Pickers";
@@ -31,6 +33,7 @@ type ModalState =
   | { kind: "preview"; message: Message; index: number }
   | { kind: "link"; url: string; browsers: Browser[] }
   | { kind: "ai"; message: Message; thread: Message[] }
+  | { kind: "mcp"; message: Message; thread: Message[]; action?: McpAction }
   | { kind: "confirm"; title: string; text: string; action: string; run: () => void };
 
 /** Tutto ciò che serve per spedire e, se serve, riaprire un messaggio pronto a partire. */
@@ -151,6 +154,7 @@ export function App() {
   const [trusted, setTrusted] = useStore<string[]>("trusted", []);
   const [rules, setRules] = useStore<Rule[]>("rules", []);
   const [templates, setTemplates] = useStore<Template[]>("templates", []);
+  const [mcpActions, setMcpActions] = useStore<McpAction[]>("mcp_actions", []);
   const labelsRef = useRef(labels);
   labelsRef.current = labels;
   // Funzioni definite più sotto, richiamate da chi vive fuori dal ciclo di render.
@@ -860,6 +864,12 @@ export function App() {
     setModal({ kind: "ai", message: m, thread: thread.length ? thread : [m] });
   };
 
+  /** Azioni MCP sul messaggio; con `action` esegue subito l'azione rapida. */
+  const runMcp = (m: Message, action?: McpAction) => {
+    const thread = threads.of(m);
+    setModal({ kind: "mcp", message: m, thread: thread.length ? thread : [m], action });
+  };
+
   const replyTo = (m: Message) => (isMine(m) ? m.to.map((c) => c.email) : [m.fromEmail]);
   const isMine = (m: Message) => m.fromEmail.toLowerCase() === accountsById[m.accountId]?.email.toLowerCase();
   const chainOf = (m: Message) => [...m.references, ...(m.messageId ? [m.messageId] : [])];
@@ -1265,6 +1275,8 @@ export function App() {
       items.push(
         { label: "Crea una regola…", icon: "filter", run: () => setModal({ kind: "settings", section: "rules", ruleDraft: { field: "from", contains: m.fromEmail, accountId: m.accountId } }), gap: true },
         { label: "Esporta in .eml", icon: "download", run: () => exportEml(m) },
+        { label: "Azioni MCP…", icon: "plug", run: () => runMcp(m), gap: true },
+        ...mcpActions.map((a): RowMenuItem => ({ label: a.name, icon: "plug", run: () => runMcp(m, a) })),
       );
     }
     return items;
@@ -1629,6 +1641,8 @@ export function App() {
           onPrint={() => window.print()}
           onExport={exportEml}
           onAskAi={askAi}
+          mcpActions={mcpActions}
+          onMcp={runMcp}
           onSaveAttachment={saveAttachment}
           onSaveAll={saveAll}
           onUnsubscribe={unsubscribe}
@@ -1700,6 +1714,22 @@ export function App() {
           onClose={() => setModal(null)}
         />
       )}
+      {modal?.kind === "mcp" && (
+        <McpRun
+          key={modal.action?.id ?? "mcp"}
+          message={modal.message}
+          thread={modal.thread}
+          actions={mcpActions}
+          onActions={setMcpActions}
+          initial={modal.action}
+          onUseAsReply={(text) => {
+            setModal(null);
+            void reply(modal.message, false, text);
+          }}
+          onOpenSettings={() => setModal({ kind: "settings", section: "mcp" })}
+          onClose={() => setModal(null)}
+        />
+      )}
       {modal?.kind === "link" && <LinkChooser url={modal.url} browsers={modal.browsers} onClose={() => setModal(null)} />}
       {modal?.kind === "account" && <AddAccount onClose={() => setModal(null)} onAdded={accountAdded} />}
       {modal?.kind === "settings" && (
@@ -1718,6 +1748,8 @@ export function App() {
           onRules={setRules}
           ruleDraft={modal.ruleDraft}
           mailboxes={mailboxes}
+          mcpActions={mcpActions}
+          onMcpActions={setMcpActions}
           onClearCache={async () => {
             await api.clearCache();
             setByFolder({});
