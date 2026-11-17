@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api } from "../api";
 import { fileSize, initials, longTime, monoOf, paragraphs, plural, providerLabel } from "../format";
 import { Icon } from "../icons";
@@ -18,7 +18,8 @@ interface Props {
   onDelete: (m: Message) => void;
   onToggleStar: (m: Message) => void;
   onToggleRead: (m: Message) => void;
-  onReply: (m: Message, all: boolean) => void;
+  /** Apre la finestra Scrivi in risposta; `body` è il testo già scritto. */
+  onReply: (m: Message, all: boolean, body?: string) => void;
   onForward: (m: Message) => void;
   /** Riapre una bozza nella finestra Scrivi. */
   onResumeDraft: (m: Message) => void;
@@ -338,6 +339,38 @@ function useHtml(m: Message): HtmlView | null | undefined {
   return html;
 }
 
+const INDENT = "    ";
+
+/**
+ * Rientra (o toglie il rientro a) le righe toccate dalla selezione. Passa da
+ * `insertText` così Ctrl+Z annulla il rientro come una normale digitazione.
+ */
+function indent(el: HTMLTextAreaElement, out: boolean) {
+  const { value, selectionStart: start, selectionEnd: end } = el;
+  // Senza selezione e senza Maiusc basta inserire il rientro dove sta il cursore.
+  if (start === end && !out) {
+    replaceRange(el, start, end, INDENT);
+    return;
+  }
+  const from = value.lastIndexOf("\n", start - 1) + 1;
+  const to = end > start && value[end - 1] === "\n" ? end - 1 : end;
+  const lines = value.slice(from, to).split("\n");
+  const changed = lines.map((l) => (out ? l.replace(/^( {1,4}|\t)/, "") : INDENT + l));
+  const first = changed[0].length - lines[0].length;
+  const total = changed.join("\n").length - (to - from);
+  replaceRange(el, from, to, changed.join("\n"));
+  el.setSelectionRange(Math.max(from, start + first), end + total);
+}
+
+function replaceRange(el: HTMLTextAreaElement, from: number, to: number, text: string) {
+  el.focus();
+  el.setSelectionRange(from, to);
+  if (!document.execCommand("insertText", false, text)) {
+    el.setRangeText(text, from, to, "end");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+}
+
 function Letter(p: Props & { message: Message }) {
   const { message: m, account: a, onQuickReply, messageLabels, snoozedUntil, onUnsnooze } = p;
   const [reply, setReply] = useState("");
@@ -366,11 +399,39 @@ function Letter(p: Props & { message: Message }) {
   const invite = useMessageInfo(m, onServer, inviteCache, api.calendarInvite);
   const [hover, setHover] = useState<string | null>(null);
 
+  // Il campo cresce con il testo fino a un tetto, poi scorre.
+  const boxRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [reply]);
+
+  // Si toglie solo la riga vuota in fondo: gli spazi iniziali sono rientri voluti.
+  const text = reply.replace(/\s+$/, "");
+
   const send = async () => {
-    if (!reply.trim() || sending) return;
+    if (!text.trim() || sending) return;
     setSending(true);
-    if (await onQuickReply(target, reply.trim())) setReply("");
+    if (await onQuickReply(target, text)) setReply("");
     setSending(false);
+  };
+
+  const expand = () => {
+    p.onReply(target, false, text);
+    setReply("");
+  };
+
+  const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      void send();
+    } else if (e.key === "Tab" && reply) {
+      // Con del testo, Tab rientra e Maiusc+Tab toglie il rientro; a campo vuoto sposta il fuoco.
+      e.preventDefault();
+      indent(e.currentTarget, e.shiftKey);
+    }
   };
 
   return (
@@ -442,17 +503,31 @@ function Letter(p: Props & { message: Message }) {
           <div className="quick-reply-box">
             <label style={{ flex: 1, minWidth: 0, display: "flex" }}>
               <span className="sr-only">Risposta rapida</span>
-              <input type="text" placeholder={`Rispondi a ${first}…`} value={reply} onChange={(e) => setReply(e.target.value)} disabled={sending} />
+              <textarea
+                ref={boxRef}
+                rows={1}
+                placeholder={`Rispondi a ${first}…`}
+                value={reply}
+                onChange={(e) => setReply(e.target.value)}
+                onKeyDown={onKey}
+                disabled={sending}
+              />
             </label>
-            {a && (
-              <span className="via">
-                <i style={{ background: a.color }} />
-                da {a.name}
-              </span>
-            )}
-            <button type="submit" className="send-mini" aria-label="Invia risposta" disabled={!reply.trim() || sending}>
-              <Icon name="send" size={16} stroke={1.9} className={sending ? "spin" : undefined} />
-            </button>
+            <div className="quick-reply-side">
+              {reply.includes("\n") && <span className="quick-reply-hint">Ctrl+Invio per inviare</span>}
+              {a && (
+                <span className="via">
+                  <i style={{ background: a.color }} />
+                  da {a.name}
+                </span>
+              )}
+              <button type="button" className="icon-btn" aria-label="Continua nella finestra Scrivi" title="Continua nella finestra Scrivi" onClick={expand} disabled={sending}>
+                <Icon name="expand" size={15} stroke={1.9} />
+              </button>
+              <button type="submit" className="send-mini" aria-label="Invia risposta" title="Invia (Ctrl+Invio)" disabled={!text.trim() || sending}>
+                <Icon name="send" size={16} stroke={1.9} className={sending ? "spin" : undefined} />
+              </button>
+            </div>
           </div>
         </form>
       )}

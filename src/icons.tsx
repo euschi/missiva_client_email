@@ -6,6 +6,7 @@ const PATHS = {
   minimize: "M6 12h12",
   maximize: "M6 6h12v12H6z",
   close: "M6 6l12 12 M18 6L6 18",
+  expand: "M15 3h6v6 M9 21H3v-6 M21 3l-7 7 M3 21l7-7",
   pen: "M12 20h9 M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z",
   plus: "M12 5v14 M5 12h14",
   sliders: "M4 21v-7 M4 10V3 M12 21v-9 M12 8V3 M20 21v-5 M20 12V3 M1 14h6 M9 8h6 M17 16h6",
