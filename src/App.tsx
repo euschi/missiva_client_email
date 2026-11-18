@@ -92,6 +92,23 @@ const SEARCH_KEY = "box:search";
 const olderKey = (listKey: string) => `box:older:${listKey}`;
 const uniqueById = (list: Message[]) => [...new Map(list.map((m) => [m.id, m])).values()];
 const prefixed = (prefix: string, s: string) => (s.toLowerCase().startsWith(prefix.toLowerCase()) ? s : `${prefix} ${s}`);
+/** Intestazioni con cui Missiva apre una citazione (risposta o inoltro). */
+const QUOTE_START = /^(Il .+ <[^>\n]+> ha scritto:|---------- Messaggio inoltrato ----------)$/m;
+
+/** Separa il testo scritto dalla citazione che Missiva ha messo in coda alla bozza. */
+const splitQuote = (text: string): { body: string; quote: string | null } => {
+  const at = text.search(QUOTE_START);
+  return at < 0 ? { body: text, quote: null } : { body: text.slice(0, at).trimEnd(), quote: text.slice(at).trim() };
+};
+
+/** La firma scelta in un messaggio già composto, ricavata dal suo testo. */
+const signatureIdOf = (a: Account | undefined, text: string | null | undefined): string => {
+  if (!a || text == null) return "default";
+  if (text === (a.signature ?? "")) return "default";
+  if (!text.trim()) return "none";
+  return (a.signatures ?? []).find((x) => x.text === text)?.id ?? "default";
+};
+
 const quote = (m: Message) => `\n\nIl ${longTime(m.date)}, ${m.fromName} <${m.fromEmail}> ha scritto:\n` + m.body.split("\n").map((l) => `> ${l}`).join("\n");
 
 /** Rubrica ricavata dalla posta scaricata: prima chi ho scritto io, poi per numero di messaggi. */
@@ -844,12 +861,15 @@ export function App() {
   /** Riapre una bozza: il salvataggio successivo sostituisce questa copia. */
   const resumeDraft = async (m: Message) => {
     const attachments = await filesOf(m);
+    // La bozza sul server contiene la citazione nel testo: si separa, così la firma torna sopra.
+    const { body, quote } = splitQuote(m.body);
     compose({
       accountId: m.accountId,
       to: m.to.map((c) => c.email),
       cc: m.cc.map((c) => c.email),
       subject: m.subject === "(nessun oggetto)" ? "" : m.subject,
-      body: m.body,
+      body,
+      quote,
       attachments,
       inReplyTo: m.inReplyTo,
       references: m.references,
@@ -1066,13 +1086,24 @@ export function App() {
 
   // ---------- Invio con tempo per annullare ----------
 
+  /** Bozza da un messaggio già composto, con la stessa firma che era stata scelta. */
+  const draftOf = (o: Outgoing): Draft => ({
+    accountId: o.accountId,
+    to: o.to,
+    cc: o.cc,
+    bcc: o.bcc,
+    subject: o.subject,
+    body: o.body,
+    attachments: o.attachments,
+    inReplyTo: o.inReplyTo,
+    references: o.references,
+    quote: o.quote,
+    quoteHtml: o.quoteHtml,
+    signatureId: signatureIdOf(accountsById[o.accountId], o.signature),
+  });
+
   const reopenDraft = (o: Outgoing, meta: SendMeta) =>
-    setModal((cur) =>
-      cur ?? {
-        kind: "compose",
-        draft: { accountId: o.accountId, to: o.to, cc: o.cc, bcc: o.bcc, subject: o.subject, body: o.body, attachments: o.attachments, inReplyTo: o.inReplyTo, references: o.references, quote: o.quote, quoteHtml: o.quoteHtml, draftId: o.messageId, replaces: meta.replaces },
-      },
-    );
+    setModal((cur) => cur ?? { kind: "compose", draft: { ...draftOf(o), draftId: o.messageId, replaces: meta.replaces } });
 
   const sendNow = async (a: Account, o: Outgoing, meta: SendMeta) => {
     try {
@@ -1326,7 +1357,7 @@ export function App() {
   // La bozza sostituisce il programmato solo quando viene inviata o riprogrammata.
   const editScheduled = (sc: Scheduled) => {
     const o = sc.outgoing;
-    compose({ accountId: o.accountId, to: o.to, cc: o.cc, bcc: o.bcc, subject: o.subject, body: o.body, attachments: o.attachments, inReplyTo: o.inReplyTo, references: o.references, replaces: sc.id });
+    compose({ ...draftOf(o), replaces: sc.id });
   };
 
   const draftDone = async (draft: Draft) => {

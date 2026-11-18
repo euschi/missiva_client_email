@@ -258,7 +258,7 @@ fn update_account(patch: AccountPatch) -> Result<Account> {
         acc.signature = v;
     }
     if let Some(v) = patch.signatures {
-        acc.signatures = v;
+        acc.signatures = accounts::clean_signatures(v);
     }
     let updated = acc.clone();
     accounts::save(&all)?;
