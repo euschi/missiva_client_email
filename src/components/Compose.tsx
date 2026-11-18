@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEditorState, type Editor } from "@tiptap/react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, errorText, inTauri } from "../api";
 import { initials, monoOf, providerLabel } from "../format";
@@ -7,6 +8,7 @@ import { hasFormatting, toHtml } from "../markdown";
 import type { Template } from "../store";
 import type { Account, Contact, Draft, Outgoing } from "../types";
 import { CloseButton, Modal } from "./Modal";
+import { MailEditorView, linkHref, useMailEditor } from "./MailEditor";
 import { Popover, WhenPicker } from "./Pickers";
 
 interface Props {
@@ -130,23 +132,122 @@ function Recipients({ label, values, onChange, contacts, autoFocus }: Recipients
   );
 }
 
-type Format = { icon: IconName; label: string; keys?: string; apply: (sel: string) => { text: string; select?: [number, number] } };
+type Format = { icon: IconName; label: string; keys?: string; mark: string; run: (e: Editor) => void };
 
-// Ogni comando restituisce il testo da mettere al posto della selezione e cosa selezionare dopo.
+// Comandi di formattazione: l'editor mostra subito il risultato, senza simboli.
 const FORMATS: Format[] = [
-  { icon: "bold", label: "Grassetto", keys: "Ctrl B", apply: (t) => ({ text: `**${t || "grassetto"}**`, select: [2, 2 + (t || "grassetto").length] }) },
-  { icon: "italic", label: "Corsivo", keys: "Ctrl I", apply: (t) => ({ text: `_${t || "corsivo"}_`, select: [1, 1 + (t || "corsivo").length] }) },
-  {
-    icon: "link",
-    label: "Link",
-    apply: (t) => {
-      const label = t || "testo";
-      return { text: `[${label}](https://)`, select: [label.length + 3, label.length + 11] };
-    },
-  },
-  { icon: "list", label: "Elenco puntato", apply: (t) => ({ text: (t || "").split("\n").map((l) => `- ${l}`).join("\n") }) },
-  { icon: "quote", label: "Citazione", apply: (t) => ({ text: (t || "").split("\n").map((l) => `> ${l}`).join("\n") }) },
+  { icon: "bold", label: "Grassetto", keys: "Ctrl B", mark: "bold", run: (e) => e.chain().focus().toggleBold().run() },
+  { icon: "italic", label: "Corsivo", keys: "Ctrl I", mark: "italic", run: (e) => e.chain().focus().toggleItalic().run() },
 ];
+const BLOCKS: Format[] = [
+  { icon: "list", label: "Elenco puntato", keys: "Ctrl Maiusc 8", mark: "bulletList", run: (e) => e.chain().focus().toggleBulletList().run() },
+  { icon: "quote", label: "Citazione", keys: "Ctrl Maiusc B", mark: "blockquote", run: (e) => e.chain().focus().toggleBlockquote().run() },
+];
+
+/** Comandi che compaiono quando il cursore è in una tabella. */
+const TABLE_ACTIONS: { label: string; run: (e: Editor) => void }[] = [
+  { label: "+ Riga", run: (e) => e.chain().focus().addRowAfter().run() },
+  { label: "+ Colonna", run: (e) => e.chain().focus().addColumnAfter().run() },
+  { label: "− Riga", run: (e) => e.chain().focus().deleteRow().run() },
+  { label: "− Colonna", run: (e) => e.chain().focus().deleteColumn().run() },
+  { label: "Elimina tabella", run: (e) => e.chain().focus().deleteTable().run() },
+];
+
+/** Barra di formattazione: i pulsanti risultano premuti quando il cursore è nel testo formattato. */
+function FormatBar({ editor }: { editor: Editor | null }) {
+  const state = useEditorState({
+    editor,
+    selector: ({ editor: e }) => ({
+      active: e ? Object.fromEntries(["bold", "italic", "link", "bulletList", "blockquote", "table"].map((m) => [m, e.isActive(m)])) : {},
+      link: (e?.getAttributes("link").href as string | undefined) ?? "",
+      empty: e?.state.selection.empty ?? true,
+    }),
+  });
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [href, setHref] = useState("");
+  const active = state?.active ?? {};
+  // Il pulsante non deve togliere il fuoco (e la selezione) al testo.
+  const keep = (e: React.MouseEvent) => e.preventDefault();
+
+  const button = (f: Format) => (
+    <button
+      key={f.label}
+      type="button"
+      className="icon-btn"
+      aria-label={f.label}
+      aria-pressed={!!active[f.mark]}
+      title={f.keys ? `${f.label} (${f.keys})` : f.label}
+      onMouseDown={keep}
+      onClick={() => editor && f.run(editor)}
+    >
+      <Icon name={f.icon} size={15} stroke={2} />
+    </button>
+  );
+
+  const applyLink = () => {
+    if (!editor) return;
+    const url = linkHref(href);
+    setLinkOpen(false);
+    if (!url) return void editor.chain().focus().extendMarkRange("link").unsetLink().run();
+    const chain = editor.chain().focus().extendMarkRange("link");
+    // Senza testo selezionato il link mostra l'indirizzo stesso.
+    if (editor.state.selection.empty && !editor.isActive("link")) chain.insertContent({ type: "text", text: href.trim(), marks: [{ type: "link", attrs: { href: url } }] }).run();
+    else chain.setLink({ href: url }).run();
+  };
+
+  return (
+    <>
+      {FORMATS.map(button)}
+      <span className="pop-anchor">
+        <button
+          type="button"
+          className="icon-btn"
+          aria-label="Link"
+          aria-pressed={!!active.link}
+          aria-expanded={linkOpen}
+          title="Link"
+          onMouseDown={keep}
+          onClick={() => {
+            setHref(state?.link ?? "");
+            setLinkOpen(!linkOpen);
+          }}
+        >
+          <Icon name="link" size={15} stroke={2} />
+        </button>
+        {linkOpen && (
+          <Popover label="Link" onClose={() => setLinkOpen(false)}>
+            <form className="pop-custom" onSubmit={(e) => (e.preventDefault(), applyLink())}>
+              <input type="text" autoFocus aria-label="Indirizzo del link" placeholder="https://… o email" value={href} onChange={(e) => setHref(e.target.value)} />
+              <button type="submit" className="btn btn-soft btn-sm">{href.trim() || !active.link ? "Applica" : "Togli"}</button>
+            </form>
+          </Popover>
+        )}
+      </span>
+      {BLOCKS.map(button)}
+      <button
+        type="button"
+        className="icon-btn"
+        aria-label="Inserisci tabella"
+        aria-pressed={!!active.table}
+        title="Inserisci tabella"
+        disabled={!!active.table}
+        onMouseDown={keep}
+        onClick={() => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
+      >
+        <Icon name="table" size={15} stroke={2} />
+      </button>
+      {active.table && (
+        <span className="table-actions" role="group" aria-label="Tabella">
+          {TABLE_ACTIONS.map((t) => (
+            <button key={t.label} type="button" className="btn btn-soft btn-sm" onMouseDown={keep} onClick={() => editor && t.run(editor)}>
+              {t.label}
+            </button>
+          ))}
+        </span>
+      )}
+    </>
+  );
+}
 
 export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templates, onTemplates, onScheduled, onDraftsChanged, contacts }: Props) {
   const [fromId, setFromId] = useState(draft.accountId ?? accounts[0]?.id);
@@ -167,20 +268,10 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
   const [templatesOpen, setTemplatesOpen] = useState(false);
   const [templateName, setTemplateName] = useState("");
   const [dropping, setDropping] = useState(false);
-  const bodyRef = useRef<HTMLTextAreaElement>(null);
-  // Selezione da ripristinare subito dopo un comando di formattazione, prima che arrivi altro input.
-  const pendingSelection = useRef<[number, number] | null>(null);
-  useLayoutEffect(() => {
-    const sel = pendingSelection.current;
-    if (!sel || !bodyRef.current) return;
-    pendingSelection.current = null;
-    bodyRef.current.focus();
-    bodyRef.current.setSelectionRange(sel[0], sel[1]);
-  }, [body]);
-
   const from = accounts.find((a) => a.id === fromId) ?? accounts[0];
 
   const formatted = hasFormatting(body);
+  const editor = useMailEditor({ value: body, onChange: setBody, placeholder: "Scrivi il messaggio…", autofocus: draft.to.length > 0 });
 
   const alternatives = from?.signatures ?? [];
   // Cambiando mittente una firma dell'altro account non vale più: si torna alla predefinita.
@@ -360,15 +451,6 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
     setTemplateName("");
   };
 
-  const format = (f: Format) => {
-    const el = bodyRef.current;
-    if (!el) return;
-    const { selectionStart: a, selectionEnd: b } = el;
-    const { text, select } = f.apply(body.slice(a, b));
-    pendingSelection.current = select ? [a + select[0], a + select[1]] : [a + text.length, a + text.length];
-    setBody(body.slice(0, a) + text + body.slice(b));
-  };
-
   const invalid = [...to, ...cc, ...bcc].some((v) => !EMAIL.test(v));
   const dirty = snapshot !== initial.current;
   const attach = async () => setFiles([...files, ...(await api.pickFiles()).filter((f) => !files.includes(f))]);
@@ -381,9 +463,6 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
           if (e.key === "Enter" && e.ctrlKey) {
             e.preventDefault();
             send();
-          } else if (e.ctrlKey && e.target === bodyRef.current && (e.key === "b" || e.key === "i")) {
-            e.preventDefault();
-            format(FORMATS[e.key === "b" ? 0 : 1]);
           }
         }}
       >
@@ -475,20 +554,7 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
 
         <div className={dropping ? "compose-paper dropping" : "compose-paper"}>
           <div role="toolbar" aria-label="Formattazione e allegati" className="compose-toolbar">
-            {FORMATS.map((f) => (
-              <button
-                key={f.label}
-                type="button"
-                className="icon-btn"
-                aria-label={f.label}
-                title={f.keys ? `${f.label} (${f.keys})` : f.label}
-                // Evita che il pulsante tolga il fuoco (e la selezione) al testo.
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => format(f)}
-              >
-                <Icon name={f.icon} size={15} stroke={2} />
-              </button>
-            ))}
+            <FormatBar editor={editor} />
             <span className="toolbar-sep" />
             <button type="button" className="icon-btn" aria-label="Allega file" title={inTauri ? "Allega file" : "Disponibile nell’app"} onClick={attach} disabled={!inTauri}>
               <Icon name="clip" size={15} stroke={2} />
@@ -522,19 +588,8 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
             </span>
             <span className="hint">{formatted ? "Inviato in HTML e testo semplice" : "Testo semplice"}</span>
           </div>
-          <div className="compose-scroll scroll" onClick={(e) => e.target === e.currentTarget && bodyRef.current?.focus()}>
-            <label style={{ display: "contents" }}>
-              <span className="sr-only">Testo del messaggio</span>
-              <textarea
-                ref={bodyRef}
-                className="compose-body"
-                value={body}
-                placeholder="Scrivi il messaggio…"
-                autoFocus={to.length > 0}
-                onChange={(e) => setBody(e.target.value)}
-                onFocus={(e) => draft.inReplyTo && e.currentTarget.setSelectionRange(0, 0)}
-              />
-            </label>
+          <div className="compose-scroll scroll" onClick={(e) => e.target === e.currentTarget && editor?.commands.focus("end")}>
+            <MailEditorView editor={editor} />
             {(signatureText.trim() || alternatives.length > 0) && (
               <div className="signature">
                 {alternatives.length > 0 && (
