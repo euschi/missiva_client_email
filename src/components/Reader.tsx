@@ -192,7 +192,7 @@ export function Reader(p: Props) {
             {m?.folder === "drafts" && (
               <button type="button" className="btn btn-primary btn-sm" onClick={() => p.onResumeDraft(m)}>
                 <Icon name="pen" size={15} />
-                Riprendi
+                Modifica
               </button>
             )}
             <button type="button" className="btn btn-soft btn-sm" disabled={!m} onClick={() => m && p.onReply(m, false)}>

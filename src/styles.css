@@ -645,6 +645,8 @@ button.tree-toggle:hover { color: var(--text); background: var(--fill); }
 .compose-body.rich ul { margin: 0; padding-left: 1.4em; }
 .compose-body.rich blockquote { margin: 0 0 0 .8em; padding-left: .8em; border-left: 3px solid var(--paper-line); color: var(--paper-muted); }
 .compose-body.rich a { color: #2457c5; text-decoration: underline; }
+.compose-body.rich img { max-width: 100%; height: auto; vertical-align: bottom; border-radius: 4px; }
+.compose-body.rich img.ProseMirror-selectednode { outline: 2px solid #2457c5; outline-offset: 2px; }
 .compose-body.rich table { border-collapse: collapse; margin: .4em 0; table-layout: fixed; }
 .compose-body.rich th, .compose-body.rich td { position: relative; min-width: 80px; padding: 4px 10px; border: 1px solid rgba(23, 23, 26, 0.25); text-align: left; vertical-align: top; }
 .compose-body.rich th { background: var(--paper-chip); font-weight: 600; }

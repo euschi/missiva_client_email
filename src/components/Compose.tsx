@@ -4,9 +4,10 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, errorText, inTauri } from "../api";
 import { initials, monoOf, providerLabel } from "../format";
 import { Icon, type IconName } from "../icons";
-import { hasFormatting, toHtml } from "../markdown";
+import { hasFormatting, imageCids, toHtml } from "../markdown";
+import { forgetDraft, rememberDraft } from "../draftMeta";
 import type { Template } from "../store";
-import type { Account, Contact, Draft, Outgoing } from "../types";
+import type { Account, Contact, Draft, InlineImage, InlineImageFile, Outgoing } from "../types";
 import { CloseButton, Modal } from "./Modal";
 import { MailEditorView, linkHref, useMailEditor } from "./MailEditor";
 import { Popover, WhenPicker } from "./Pickers";
@@ -154,7 +155,7 @@ const TABLE_ACTIONS: { label: string; run: (e: Editor) => void }[] = [
 ];
 
 /** Barra di formattazione: i pulsanti risultano premuti quando il cursore è nel testo formattato. */
-function FormatBar({ editor }: { editor: Editor | null }) {
+function FormatBar({ editor, onImage }: { editor: Editor | null; onImage: () => void }) {
   const state = useEditorState({
     editor,
     selector: ({ editor: e }) => ({
@@ -224,6 +225,9 @@ function FormatBar({ editor }: { editor: Editor | null }) {
         )}
       </span>
       {BLOCKS.map(button)}
+      <button type="button" className="icon-btn" aria-label="Inserisci immagine" title={inTauri ? "Inserisci immagine (anche incollandola)" : "Incolla un'immagine nel testo"} onMouseDown={keep} onClick={onImage}>
+        <Icon name="image" size={15} stroke={2} />
+      </button>
       <button
         type="button"
         className="icon-btn"
@@ -271,7 +275,83 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
   const from = accounts.find((a) => a.id === fromId) ?? accounts[0];
 
   const formatted = hasFormatting(body);
-  const editor = useMailEditor({ value: body, onChange: setBody, placeholder: "Scrivi il messaggio…", autofocus: draft.to.length > 0 });
+
+  // Immagini nel testo, per cid; l'anteprima di quelle di una bozza riaperta arriva dopo.
+  const [images, setImages] = useState<Record<string, InlineImage & { url?: string }>>(() => Object.fromEntries((draft.images ?? []).map((i) => [i.cid, i])));
+  useEffect(() => {
+    for (const img of draft.images ?? []) {
+      api.inlineImageUrl(img.path).then(
+        (url) => setImages((all) => (all[img.cid] ? { ...all, [img.cid]: { ...all[img.cid], url } } : all)),
+        () => {},
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const imagesKey = Object.values(images).map((i) => `${i.cid}:${i.url ? 1 : 0}`).join(",");
+
+  const editor = useMailEditor({
+    value: body,
+    onChange: setBody,
+    placeholder: "Scrivi il messaggio…",
+    autofocus: draft.to.length > 0,
+    images: (cid) => images[cid]?.url,
+    imagesKey,
+    onPasteImages: (list) => void pasteImages(list),
+  });
+
+  /** Mette l'immagine nel testo: al cursore, oppure in `at` (posizione nel documento). */
+  const insertImage = (f: InlineImageFile, at?: number) => {
+    const cid = `${crypto.randomUUID()}@missiva`;
+    setImages((all) => ({ ...all, [cid]: { cid, path: f.path, mime: f.mime, name: f.name, url: f.url } }));
+    const node = { type: "image", attrs: { src: f.url, alt: f.name, cid } };
+    if (at === undefined) editor?.chain().focus().insertContent(node).run();
+    else editor?.chain().focus().insertContentAt(at, node).run();
+  };
+
+  /** File trascinati: le immagini vanno nel testo dove si lasciano, il resto tra gli allegati. */
+  const dropFiles = async (paths: string[], point: { x: number; y: number }) => {
+    const isImage = (p: string) => /\.(png|jpe?g|gif|webp|bmp)$/i.test(p);
+    const others = paths.filter((p) => !isImage(p));
+    if (others.length) setFiles((list) => [...list, ...others.filter((f) => !list.includes(f))]);
+    // La prima dove si è lasciato il file, le altre di seguito (il cursore la segue).
+    let at = editor?.view.posAtCoords({ left: point.x, top: point.y })?.pos;
+    try {
+      for (const path of paths.filter(isImage)) {
+        insertImage(await api.importInlineImage(path), at);
+        at = undefined;
+      }
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+  const dropRef = useRef(dropFiles);
+  dropRef.current = dropFiles;
+
+  const pickImages = async () => {
+    try {
+      for (const path of await api.pickImages()) insertImage(await api.importInlineImage(path));
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+
+  const pasteImages = async (list: File[]) => {
+    try {
+      for (const file of list) {
+        const data = await new Promise<string>((ok, ko) => {
+          const r = new FileReader();
+          r.onload = () => ok(String(r.result).split(",")[1] ?? "");
+          r.onerror = () => ko(new Error("Immagine non leggibile"));
+          r.readAsDataURL(file);
+        });
+        const ext = file.type.split("/")[1]?.replace("jpeg", "jpg") ?? "png";
+        const name = /\.[a-z0-9]+$/i.test(file.name) ? file.name : `immagine.${ext}`;
+        insertImage(await api.pasteInlineImage(name, data, file.type));
+      }
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
 
   const alternatives = from?.signatures ?? [];
   // Cambiando mittente una firma dell'altro account non vale più: si torna alla predefinita.
@@ -298,11 +378,13 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
     quoteHtml: keepQuote ? (draft.quoteHtml ?? null) : null,
     signature: signatureText,
     signatureHtml: signatureFormatted ? toHtml(signatureText) : null,
+    // Solo le immagini ancora nel testo, senza l'anteprima.
+    inlineImages: imageCids(body).flatMap((cid) => (images[cid] ? [{ cid, path: images[cid].path, mime: images[cid].mime, name: images[cid].name }] : [])),
   });
   const snapshot = JSON.stringify([from?.id, to, cc, bcc, subject, body, files, keepQuote, chosenSignature]);
   // Stato dell'ultimo render, per chi legge dopo un'attesa: conferma dei destinatari al blur compresa.
-  const latest = useRef({ outgoing, snapshot });
-  latest.current = { outgoing, snapshot };
+  const latest = useRef({ outgoing, snapshot, signatureId: chosenSignature });
+  latest.current = { outgoing, snapshot, signatureId: chosenSignature };
 
   const initial = useRef(snapshot);
   const saved = useRef(snapshot);
@@ -317,13 +399,24 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
 
   /** I salvataggi passano in fila: arrivano al server nell'ordine in cui sono partiti. */
   const persist = () => {
-    const { outgoing: current, snapshot: snap } = latest.current;
+    const { outgoing: current, snapshot: snap, signatureId } = latest.current;
     const out = current();
     const previous = savedIn.current;
     saving.current = saving.current
       .catch(() => {})
       .then(async () => {
         await api.saveDraft(out);
+        // Il server non tiene Ccn, firma scelta, citazione impaginata e immagini: le ricorda Missiva.
+        await rememberDraft(messageId.current, {
+          accountId: out.accountId,
+          savedAt: Math.floor(Date.now() / 1000),
+          body: out.body,
+          bcc: out.bcc,
+          quote: out.quote ?? null,
+          quoteHtml: out.quoteHtml ?? null,
+          signatureId,
+          images: out.inlineImages ?? [],
+        });
         savedIn.current = out.accountId;
         saved.current = snap;
         if (previous && previous !== out.accountId) await api.deleteDraft(previous, messageId.current).catch(() => {});
@@ -373,6 +466,7 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
     await saving.current.catch(() => {});
     if (savedIn.current) {
       await api.deleteDraft(savedIn.current, messageId.current).catch((e) => setError(errorText(e)));
+      forgetDraft(messageId.current);
       onDraftsChanged(false);
     }
     onClose();
@@ -398,6 +492,7 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
         await saving.current.catch(() => {});
         if (savedIn.current) {
           await api.deleteDraft(savedIn.current, messageId.current).catch(() => {});
+          forgetDraft(messageId.current);
           onDraftsChanged(false);
         }
         onScheduled(from, at);
@@ -421,8 +516,9 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
     getCurrentWebview()
       .onDragDropEvent((e) => {
         if (e.payload.type === "drop") {
-          const dropped = e.payload.paths;
-          setFiles((list) => [...list, ...dropped.filter((f) => !list.includes(f))]);
+          // Il sistema dà la posizione in pixel fisici: l'editor ragiona in pixel CSS.
+          const scale = window.devicePixelRatio || 1;
+          void dropRef.current(e.payload.paths, { x: e.payload.position.x / scale, y: e.payload.position.y / scale });
           setDropping(false);
         } else {
           setDropping(e.payload.type !== "leave");
@@ -468,7 +564,7 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
       >
         <header className="window-head">
           <div className="window-head-title">
-            <span className="window-title">{draft.inReplyTo ? "Risposta" : "Nuovo messaggio"}</span>
+            <span className="window-title">{draft.draftId && !draft.replaces ? "Modifica bozza" : draft.inReplyTo ? "Risposta" : "Nuovo messaggio"}</span>
             <span className="window-meta">{formatted ? "Testo formattato" : "Testo semplice"}</span>
           </div>
           <CloseButton onClose={close} label={canSave ? "Chiudi e salva in Bozze" : "Chiudi e torna alla posta"} />
@@ -554,7 +650,7 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
 
         <div className={dropping ? "compose-paper dropping" : "compose-paper"}>
           <div role="toolbar" aria-label="Formattazione e allegati" className="compose-toolbar">
-            <FormatBar editor={editor} />
+            <FormatBar editor={editor} onImage={pickImages} />
             <span className="toolbar-sep" />
             <button type="button" className="icon-btn" aria-label="Allega file" title={inTauri ? "Allega file" : "Disponibile nell’app"} onClick={attach} disabled={!inTauri}>
               <Icon name="clip" size={15} stroke={2} />

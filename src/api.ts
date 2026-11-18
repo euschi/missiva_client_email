@@ -3,12 +3,15 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { demo } from "./demo";
-import type { Account, AccountPatch, AiAgent, McpResult, McpServer, McpTool, Browser, Folder, Invite, SearchQuery, Unsubscribe, Guess, HtmlView, Mailbox, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
+import type { Account, AccountPatch, AiAgent, McpResult, McpServer, McpTool, Browser, Folder, Invite, SearchQuery, Unsubscribe, Guess, HtmlView, InlineImageFile, Mailbox, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
 
 export const inTauri = isTauri();
 
 type MessageRef = Pick<Message, "accountId" | "folder" | "mailbox" | "uid">;
 const ref = (m: Message): MessageRef => ({ accountId: m.accountId, folder: m.folder, mailbox: m.mailbox, uid: m.uid });
+
+/** Anteprima: le immagini incollate restano in memoria finché la pagina è aperta. */
+const demoImages = new Map<string, string>();
 
 export const api = {
   listAccounts: (): Promise<Account[]> => (inTauri ? invoke("list_accounts") : demo.listAccounts()),
@@ -122,9 +125,9 @@ export const api = {
 
   setDefaultMailClient: (): Promise<void> => (inTauri ? invoke("set_default_mail_client") : Promise.resolve()),
 
-  saveDraft: (outgoing: Outgoing): Promise<void> => (inTauri ? invoke("save_draft", { outgoing }) : Promise.resolve()),
+  saveDraft: (outgoing: Outgoing): Promise<void> => (inTauri ? invoke("save_draft", { outgoing }) : demo.saveDraft(outgoing)),
 
-  deleteDraft: (account: string, messageId: string): Promise<void> => (inTauri ? invoke("delete_draft", { account, messageId }) : Promise.resolve()),
+  deleteDraft: (account: string, messageId: string): Promise<void> => (inTauri ? invoke("delete_draft", { account, messageId }) : demo.deleteDraft(account, messageId)),
 
   deleteForever: (ms: Message[]): Promise<void> => (inTauri ? invoke("delete_forever", { targets: ms.map(ref) }) : Promise.resolve()),
 
@@ -204,6 +207,28 @@ export const api = {
 
   /** Riporta in primo piano la finestra, anche se nascosta nell'area di notifica. */
   showWindow: (): Promise<void> => (inTauri ? invoke("show_window") : Promise.resolve()),
+
+  /** Copia un'immagine dal disco nella cache, per metterla nel testo. */
+  importInlineImage: (path: string): Promise<InlineImageFile> => (inTauri ? invoke("import_inline_image", { path }) : Promise.reject(new Error("Disponibile nell'app"))),
+
+  /** Immagine incollata (base64 senza intestazione `data:`). */
+  pasteInlineImage: (name: string, data: string, mime: string): Promise<InlineImageFile> => {
+    if (inTauri) return invoke("paste_inline_image", { name, data });
+    const path = `demo/${crypto.randomUUID()}/${name}`;
+    demoImages.set(path, `data:${mime};base64,${data}`);
+    return Promise.resolve({ path, name, mime, url: demoImages.get(path)! });
+  },
+
+  /** Anteprima di un'immagine già in cache, per riaprire una bozza. */
+  inlineImageUrl: (path: string): Promise<string> =>
+    inTauri ? invoke("inline_image_url", { path }) : demoImages.has(path) ? Promise.resolve(demoImages.get(path)!) : Promise.reject(new Error("Non disponibile")),
+
+  pickImages: async (): Promise<string[]> => {
+    if (!inTauri) return [];
+    const picked = await open({ multiple: true, title: "Inserisci immagine", filters: [{ name: "Immagini", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }] });
+    if (!picked) return [];
+    return Array.isArray(picked) ? picked : [picked];
+  },
 
   pickFiles: async (): Promise<string[]> => {
     if (!inTauri) return [];

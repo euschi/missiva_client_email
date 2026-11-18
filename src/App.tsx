@@ -23,6 +23,8 @@ import { listenNotificationClicks, notifyNewMail, type NotificationTarget } from
 import { buildThreads } from "./threads";
 import { applyPrefs, loadPrefs, savePrefs, type Prefs } from "./prefs";
 import { keyOf, useStore, type Labels, type Rule, type Snooze, type Template } from "./store";
+import { draftMeta, forgetDraft } from "./draftMeta";
+import { plainImages } from "./markdown";
 import type { Account, Attachment, Browser, Contact, Draft, Folder, Mailbox, Message, OpenBox, Outgoing, Scheduled, Unsubscribe } from "./types";
 
 type ModalState =
@@ -529,6 +531,8 @@ export function App() {
       setChecked([]);
       anchor.current = m.id;
       select(m);
+      // Una bozza si apre già pronta da modificare.
+      if (m.folder === "drafts" && !m.scheduled && !m.id.startsWith("local:")) void resumeDraft(m);
     }
   };
 
@@ -860,16 +864,22 @@ export function App() {
 
   /** Riapre una bozza: il salvataggio successivo sostituisce questa copia. */
   const resumeDraft = async (m: Message) => {
-    const attachments = await filesOf(m);
-    // La bozza sul server contiene la citazione nel testo: si separa, così la firma torna sopra.
-    const { body, quote } = splitQuote(m.body);
+    const [attachments, meta] = await Promise.all([filesOf(m), draftMeta(m.messageId)]);
+    // Salvata da Missiva e non cambiata altrove: si riprende tutto, anche quello che il server non tiene.
+    const own = meta && meta.accountId === m.accountId && m.date <= meta.savedAt + 300 ? meta : null;
+    // Altrimenti la citazione è nel testo: si separa, così la firma torna sopra.
+    const { body, quote } = own ? { body: own.body, quote: own.quote } : splitQuote(m.body);
     compose({
       accountId: m.accountId,
       to: m.to.map((c) => c.email),
       cc: m.cc.map((c) => c.email),
+      bcc: own?.bcc ?? [],
       subject: m.subject === "(nessun oggetto)" ? "" : m.subject,
       body,
       quote,
+      quoteHtml: own?.quoteHtml ?? null,
+      signatureId: own?.signatureId,
+      images: own?.images,
       attachments,
       inReplyTo: m.inReplyTo,
       references: m.references,
@@ -913,8 +923,8 @@ export function App() {
       to: o.to.map((email) => ({ name: email, email })),
       cc: o.cc.map((email) => ({ name: email, email })),
       subject: o.subject || "(nessun oggetto)",
-      snippet: o.body.replace(/\s+/g, " ").slice(0, 180),
-      body: o.quote ? `${o.body}\n\n${o.quote}` : o.body,
+      snippet: plainImages(o.body).replace(/\s+/g, " ").slice(0, 180),
+      body: o.quote ? `${plainImages(o.body)}\n\n${o.quote}` : plainImages(o.body),
       date,
       unread: false,
       flagged: false,
@@ -1102,6 +1112,7 @@ export function App() {
     quote: o.quote,
     quoteHtml: o.quoteHtml,
     signatureId: signatureIdOf(accountsById[o.accountId], o.signature),
+    images: o.inlineImages,
   });
 
   const reopenDraft = (o: Outgoing, meta: SendMeta) =>
@@ -1129,6 +1140,7 @@ export function App() {
       }
     }
     if (meta.savedIn) await api.deleteDraft(meta.savedIn, o.messageId ?? "").catch(() => {});
+    forgetDraft(o.messageId);
     if (meta.replaces) await api.cancelScheduled(meta.replaces).catch(() => {});
     loadScheduled();
     sync("drafts");
