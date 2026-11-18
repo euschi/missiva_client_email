@@ -527,6 +527,26 @@ async fn prepare_attachments(target: MessageRef, indexes: Vec<usize>) -> Result<
     blocking(move || mail::attachment_files(&raw, &indexes)).await
 }
 
+/// Immagine scelta dal disco da mettere nel testo del messaggio.
+#[tauri::command]
+fn import_inline_image(path: String) -> Result<mail::InlineImageFile> {
+    let bytes = std::fs::read(&path)?;
+    mail::store_inline_image(&path, &bytes)
+}
+
+/// Immagine incollata (in base64) da mettere nel testo del messaggio.
+#[tauri::command]
+fn paste_inline_image(name: String, data: String) -> Result<mail::InlineImageFile> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data.trim()).map_err(|_| msg("Immagine incollata non leggibile"))?;
+    mail::store_inline_image(&name, &bytes)
+}
+
+#[tauri::command]
+fn inline_image_url(path: String) -> Result<String> {
+    mail::inline_image_url(&path)
+}
+
 /// Salva la bozza nella cartella Bozze: sostituisce quella con lo stesso Message-ID.
 #[tauri::command]
 async fn save_draft(outgoing: smtp::Outgoing) -> Result<()> {
@@ -983,7 +1003,7 @@ async fn flush_outbox(handle: &AppHandle) -> Vec<(String, Option<String>)> {
 }
 
 /// File JSON condivisi con il frontend (posticipi, etichette, regole, modelli…) in ~/.config/missiva/.
-const STORES: [&str; 6] = ["snoozed", "labels", "trusted", "rules", "templates", "mcp_actions"];
+const STORES: [&str; 7] = ["snoozed", "labels", "trusted", "rules", "templates", "mcp_actions", "drafts_meta"];
 
 fn store_path(name: &str) -> Result<std::path::PathBuf> {
     if !STORES.contains(&name) {
@@ -1119,6 +1139,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_accounts,
+            import_inline_image,
+            paste_inline_image,
+            inline_image_url,
             autoconfig,
             add_imap_account,
             add_oauth_account,

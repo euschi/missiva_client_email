@@ -6,6 +6,23 @@ export type Security = "tls" | "starttls";
 export type Folder = "inbox" | "drafts" | "sent" | "archive" | "trash" | "other";
 
 /** Cartella creata dall'utente sul server. */
+/** Immagine nel testo di un messaggio: il testo la richiama con `![nome](cid:…)`. */
+export interface InlineImage {
+  cid: string;
+  /** Copia nella cache di Missiva. */
+  path: string;
+  mime: string;
+  name: string;
+}
+
+/** Immagine appena importata, con l'anteprima per l'editor. */
+export interface InlineImageFile {
+  path: string;
+  name: string;
+  mime: string;
+  url: string;
+}
+
 /** Firma alternativa di un account. */
 export interface Signature {
   id: string;
@@ -229,6 +246,7 @@ export interface Outgoing {
   /** Firma scelta; senza vale quella dell'account. */
   signature?: string | null;
   signatureHtml?: string | null;
+  inlineImages?: InlineImage[];
 }
 
 /** Messaggio in coda per "Invia più tardi". */
@@ -270,4 +288,6 @@ export interface Draft {
   replaces?: string;
   /** Firma scelta: "default", "none" o l'id di una firma alternativa. */
   signatureId?: string;
+  /** Immagini richiamate nel testo. */
+  images?: InlineImage[];
 }

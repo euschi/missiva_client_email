@@ -82,6 +82,7 @@ const sentCopy = (o: Outgoing, date: number): Message => ({
   hasHtml: false,
 });
 const gateway = inbox[0];
+let draftsBox: Message[] = [];
 let sentBox: Message[] = [
   {
     ...sentCopy(
@@ -212,8 +213,19 @@ export const demo = {
     inbox = inbox.filter((m) => m.accountId !== id);
     return wait(undefined, 0);
   },
+  /** Come il server: tiene testo semplice e citazione, non Ccn né firma. */
+  saveDraft: (o: Outgoing) => {
+    const date = nowSec();
+    const copy: Message = { ...sentCopy(o, date), id: `${o.accountId}:draft:${o.messageId}`, folder: "drafts", mailbox: "Drafts", cc: o.cc.map((email) => ({ name: email, email })), body: o.quote ? `${o.body}\n\n${o.quote}` : o.body };
+    draftsBox = [copy, ...draftsBox.filter((m) => m.messageId !== o.messageId)];
+    return wait(undefined, 0);
+  },
+  deleteDraft: (_account: string, messageId: string) => {
+    draftsBox = draftsBox.filter((m) => m.messageId !== messageId);
+    return wait(undefined, 0);
+  },
   messages: (folder: Folder) =>
-    wait((folder === "inbox" ? inbox : folder === "sent" ? sentBox : []).filter((m) => accounts.some((a) => a.id === m.accountId)), 0),
+    wait((folder === "inbox" ? inbox : folder === "sent" ? sentBox : folder === "drafts" ? draftsBox : []).filter((m) => accounts.some((a) => a.id === m.accountId)), 0),
   sync: async (folder: Folder, account?: string): Promise<SyncReport> => ({
     messages: (await demo.messages(folder).then((m) => wait(m, 1200))).filter((m) => !account || m.accountId === account),
     errors: [],
