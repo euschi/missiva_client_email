@@ -935,8 +935,10 @@ export function App() {
       cc: [],
       bcc: [],
       subject: prefixed("Re:", m.subject),
-      body: text + quote(m),
+      body: text,
       html: null,
+      // Citazione a parte: la firma va sotto il testo, non sotto il messaggio citato.
+      quote: quote(m).trim(),
       attachments: [],
       inReplyTo: m.messageId,
       references: chainOf(m),

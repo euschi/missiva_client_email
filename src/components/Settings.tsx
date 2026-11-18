@@ -7,6 +7,7 @@ import { SHORTCUTS } from "../shortcuts";
 import { forgetTools, joinCommand, pairsText, parsePairs, parseServersJson, splitCommand, type McpAction } from "../mcp";
 import { LABEL_COLORS, type Labels, type Rule } from "../store";
 import { PRESETS, accentOf, inkFor, isHex, type Density, type Prefs, type Reader } from "../prefs";
+import { version } from "../../package.json";
 import type { Account, AccountPatch, Mailbox, McpServer } from "../types";
 import { CloseButton, Modal } from "./Modal";
 
@@ -65,6 +66,7 @@ export function Settings(p: Props) {
               {s.label}
             </button>
           ))}
+          <span className="settings-version">Missiva {version}</span>
         </nav>
         <section className="settings-main scroll">
           {section === "accounts" && <Accounts {...p} />}

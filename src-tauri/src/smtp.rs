@@ -106,7 +106,8 @@ fn assemble(b: lettre::message::MessageBuilder, acc: &Account, out: &Outgoing, w
     let signature_html = out.signature_html.as_deref().filter(|_| signed);
     let mut body = out.body.trim_end().to_string();
     if signed {
-        body = format!("{body}\n\n-- \n{signature}");
+        // Niente separatore "-- ": molti programmi lo mostrano così com'è, come testo in più.
+        body = format!("{body}\n\n{signature}");
     }
     if let Some(quote) = &out.quote {
         body = format!("{body}\n\n{quote}");
@@ -116,7 +117,7 @@ fn assemble(b: lettre::message::MessageBuilder, acc: &Account, out: &Outgoing, w
         let main = out.html.clone().unwrap_or_else(|| escape_html(&out.body).replace('\n', "<br>"));
         let sig = if signed {
             let content = signature_html.map(str::to_string).unwrap_or_else(|| escape_html(signature).replace('\n', "<br>"));
-            format!("<div style=\"color:#666\">-- <br>{content}</div>")
+            format!("<div style=\"margin-top:1em;color:#666\">{content}</div>")
         } else {
             String::new()
         };
