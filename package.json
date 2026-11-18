@@ -13,6 +13,11 @@
     "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-dialog": "^2.4.0",
     "@tauri-apps/plugin-notification": "^2.8.0",
+    "@tiptap/extension-table": "3.32.2",
+    "@tiptap/extensions": "3.32.2",
+    "@tiptap/pm": "3.32.2",
+    "@tiptap/react": "3.32.2",
+    "@tiptap/starter-kit": "3.32.2",
     "pdfjs-dist": "5.7.284",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"

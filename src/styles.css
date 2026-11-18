@@ -634,6 +634,22 @@ button.tree-toggle:hover { color: var(--text); background: var(--fill); }
 .compose-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 24px 32px; display: flex; flex-direction: column; gap: 14px; }
 .compose-body { flex: 1 0 160px; width: 100%; border: 0; outline: 0; resize: none; background: transparent; color: var(--paper-ink); font-size: 15.5px; line-height: 1.7; }
 .compose-body::placeholder { color: var(--paper-muted); }
+.compose-toolbar { flex-wrap: wrap; }
+.compose-toolbar .icon-btn[aria-pressed="true"] { background: var(--paper-chip); color: var(--paper-ink); box-shadow: inset 0 0 0 1px var(--paper-line); }
+.compose-toolbar .icon-btn:disabled { opacity: .45; }
+.table-actions { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-left: 6px; }
+.table-actions .btn { color: var(--paper-ink); }
+/* Editor formattato: stesso aspetto del messaggio che parte. */
+.compose-body.rich { min-height: 160px; white-space: pre-wrap; word-break: break-word; }
+.compose-body.rich p { margin: 0; }
+.compose-body.rich ul { margin: 0; padding-left: 1.4em; }
+.compose-body.rich blockquote { margin: 0 0 0 .8em; padding-left: .8em; border-left: 3px solid var(--paper-line); color: var(--paper-muted); }
+.compose-body.rich a { color: #2457c5; text-decoration: underline; }
+.compose-body.rich table { border-collapse: collapse; margin: .4em 0; table-layout: fixed; }
+.compose-body.rich th, .compose-body.rich td { position: relative; min-width: 80px; padding: 4px 10px; border: 1px solid rgba(23, 23, 26, 0.25); text-align: left; vertical-align: top; }
+.compose-body.rich th { background: var(--paper-chip); font-weight: 600; }
+.compose-body.rich .selectedCell::after { content: ""; position: absolute; inset: 0; background: rgba(36, 87, 197, 0.12); pointer-events: none; }
+.compose-body.rich p.is-editor-empty:first-child::before { content: attr(data-placeholder); float: left; height: 0; color: var(--paper-muted); pointer-events: none; }
 .signature { display: flex; flex-direction: column; gap: 2px; padding-top: 14px; border-top: 1px dashed var(--paper-line); font-size: 13.5px; line-height: 1.5; color: var(--paper-muted); white-space: pre-wrap; }
 .signature strong { color: var(--paper-ink); font-weight: 600; }
 .signature-html { white-space: normal; }
