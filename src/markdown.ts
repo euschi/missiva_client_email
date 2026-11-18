@@ -4,6 +4,7 @@
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+const IMAGE = /!\[([^\]\n]*)\]\(cid:([^\s)]+)\)/g;
 const LINK = /\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^\s)]+)\)/g;
 const BOLD = /\*\*(?=\S)(.+?)(?<=\S)\*\*/g;
 const ITALIC = /(^|[\s(])_(?=\S)(.+?)(?<=\S)_(?=$|[\s).,;:!?])/g;
@@ -22,8 +23,19 @@ const isTableStart = (lines: string[], i: number) => TABLE_ROW.test(lines[i]) &&
 
 const CELL = "border:1px solid #ccc;padding:4px 10px;text-align:left;vertical-align:top";
 
+/** Anteprima di un'immagine per l'editor, dal suo cid; senza, l'email la richiama con `cid:`. */
+export type ImageUrls = (cid: string) => string | undefined;
+
+let imageUrls: ImageUrls | null = null;
+
+function image(alt: string, cid: string): string {
+  if (!imageUrls) return `<img src="cid:${cid}" alt="${alt}" style="max-width:100%">`;
+  return `<img src="${esc(imageUrls(cid) ?? "")}" alt="${alt}" data-cid="${cid}">`;
+}
+
 function inline(s: string): string {
-  return esc(s).replace(LINK, '<a href="$2">$1</a>').replace(BOLD, "<strong>$1</strong>").replace(ITALIC, "$1<em>$2</em>");
+  // Le immagini prima dei link: hanno la stessa forma con il ! davanti.
+  return esc(s).replace(IMAGE, (_, alt, cid) => image(alt, cid)).replace(LINK, '<a href="$2">$1</a>').replace(BOLD, "<strong>$1</strong>").replace(ITALIC, "$1<em>$2</em>");
 }
 
 /** Il rientro a inizio riga resta visibile anche in HTML, che altrimenti lo comprime. */
@@ -36,7 +48,20 @@ function indented(line: string): string {
  * HTML del testo. Per l'email le righe consecutive formano un paragrafo; con `editor` ogni riga è un
  * paragrafo a sé e le righe vuote restano, così l'editor mostra il testo esattamente com'è.
  */
-export function toHtml(text: string, editor = false): string {
+export function toHtml(text: string, editor = false, images?: ImageUrls): string {
+  if (editor) {
+    const previous = imageUrls;
+    imageUrls = images ?? (() => undefined);
+    try {
+      return blocks(text, true);
+    } finally {
+      imageUrls = previous;
+    }
+  }
+  return blocks(text, false);
+}
+
+function blocks(text: string, editor: boolean): string {
   const lines = text.split("\n");
   const out: string[] = [];
   let i = 0;
@@ -54,7 +79,7 @@ export function toHtml(text: string, editor = false): string {
     } else if (QUOTE.test(lines[i])) {
       const block: string[] = [];
       while (i < lines.length && QUOTE.test(lines[i])) block.push(lines[i++].replace(/^\s*> ?/, ""));
-      out.push(`<blockquote style="margin:0 0 0 .8em;padding-left:.8em;border-left:3px solid #ccc;color:#555">${toHtml(block.join("\n"), editor)}</blockquote>`);
+      out.push(`<blockquote style="margin:0 0 0 .8em;padding-left:.8em;border-left:3px solid #ccc;color:#555">${blocks(block.join("\n"), editor)}</blockquote>`);
     } else if (LIST.test(lines[i])) {
       const items: string[] = [];
       while (i < lines.length && LIST.test(lines[i])) items.push(`<li>${editor ? "<p>" : ""}${inline(lines[i++].replace(LIST, ""))}${editor ? "</p>" : ""}</li>`);
@@ -75,7 +100,7 @@ export function toHtml(text: string, editor = false): string {
 /** Vero se il testo usa la formattazione: solo allora si invia anche la versione HTML. */
 export function hasFormatting(text: string): boolean {
   const lines = text.split("\n");
-  return [LINK, BOLD, ITALIC].some((re) => new RegExp(re.source).test(text)) || lines.some((l, i) => LIST.test(l) || isTableStart(lines, i));
+  return [IMAGE, LINK, BOLD, ITALIC].some((re) => new RegExp(re.source).test(text)) || lines.some((l, i) => LIST.test(l) || isTableStart(lines, i));
 }
 
 // ---------- Dall'editor al testo ----------
@@ -118,7 +143,7 @@ function inlineText(nodes: DocNode[] = []): string {
       out += "\n";
       continue;
     }
-    const text = (n.text ?? "").replace(/\u00a0/g, " ");
+    const text = n.type === "image" ? imageText(n) : (n.text ?? "").replace(/\u00a0/g, " ");
     const core = text.trim();
     if (!core) {
       out += text;
@@ -135,6 +160,24 @@ function inlineText(nodes: DocNode[] = []): string {
   }
   closeFrom(0);
   return out;
+}
+
+/** Un'immagine nel testo: si richiama con il suo cid, il nome è il testo alternativo. */
+function imageText(n: DocNode): string {
+  const cid = n.attrs?.cid as string | undefined;
+  if (!cid) return "";
+  const alt = String(n.attrs?.alt ?? "").replace(/[\]\n]/g, " ").trim();
+  return `![${alt}](cid:${cid})`;
+}
+
+/** Testo da mostrare senza HTML: le immagini diventano «[immagine: nome]», come nell'email. */
+export function plainImages(text: string): string {
+  return text.replace(new RegExp(IMAGE.source, "g"), (_, alt: string) => (alt.trim() ? `[immagine: ${alt.trim()}]` : "[immagine]"));
+}
+
+/** cid delle immagini richiamate nel testo. */
+export function imageCids(text: string): string[] {
+  return [...text.matchAll(new RegExp(IMAGE.source, "g"))].map((m) => m[2]);
 }
 
 function blockLines(n: DocNode): string[] {
@@ -156,6 +199,8 @@ function blockLines(n: DocNode): string[] {
       const line = (r: string[]) => `| ${r.map((c) => c || " ").join(" | ")} |`;
       return [line(rows[0]), line(rows[0].map(() => "---")), ...rows.slice(1).map(line)];
     }
+    case "image":
+      return [imageText(n)];
     default:
       return n.content ? n.content.flatMap(blockLines) : n.text ? [n.text] : [];
   }

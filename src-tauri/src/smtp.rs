@@ -46,6 +46,49 @@ pub struct Outgoing {
     /// Firma già convertita in HTML, se è formattata.
     #[serde(default)]
     pub signature_html: Option<String>,
+    /// Immagini richiamate nel testo HTML.
+    #[serde(default)]
+    pub inline_images: Vec<InlineImage>,
+}
+
+/// Immagine nel testo: l'HTML la richiama con `cid:`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineImage {
+    pub cid: String,
+    pub path: String,
+    pub mime: String,
+    pub name: String,
+}
+
+/// Nel testo semplice le immagini `![nome](cid:…)` diventano «[immagine: nome]».
+fn plain_images(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("![") {
+        let after = &rest[start + 2..];
+        let parsed = after.find("](cid:").and_then(|close| {
+            let alt = &after[..close];
+            let tail = &after[close + 6..];
+            (!alt.contains(['\n', ']'])).then_some(())?;
+            let end = tail.find(')')?;
+            (!tail[..end].contains(char::is_whitespace)).then_some((alt, close + 6 + end + 1))
+        });
+        match parsed {
+            Some((alt, len)) => {
+                out.push_str(&rest[..start]);
+                let alt = alt.trim();
+                out.push_str(&if alt.is_empty() { "[immagine]".to_string() } else { format!("[immagine: {alt}]") });
+                rest = &after[len..];
+            }
+            None => {
+                out.push_str(&rest[..start + 2]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Gli id nelle intestazioni vanno tra parentesi angolari (RFC 5322).
@@ -104,7 +147,7 @@ fn assemble(b: lettre::message::MessageBuilder, acc: &Account, out: &Outgoing, w
     let signature = out.signature.as_deref().unwrap_or(&acc.signature).trim_end();
     let signed = with_signature && !signature.trim().is_empty();
     let signature_html = out.signature_html.as_deref().filter(|_| signed);
-    let mut body = out.body.trim_end().to_string();
+    let mut body = plain_images(out.body.trim_end());
     if signed {
         // Niente separatore "-- ": molti programmi lo mostrano così com'è, come testo in più.
         body = format!("{body}\n\n{signature}");
@@ -125,15 +168,29 @@ fn assemble(b: lettre::message::MessageBuilder, acc: &Account, out: &Outgoing, w
         format!("<!doctype html><html><body style=\"font-family:sans-serif;line-height:1.5\">{main}{sig}{quote}</body></html>")
     });
 
+    // Testo semplice e HTML; l'HTML porta con sé le immagini che richiama (multipart/related).
+    let alternative = |h: String| -> Result<MultiPart> {
+        let used: Vec<&InlineImage> = out.inline_images.iter().filter(|i| h.contains(&format!("cid:{}", i.cid))).collect();
+        if used.is_empty() {
+            return Ok(MultiPart::alternative_plain_html(body.clone(), h));
+        }
+        let mut related = MultiPart::related().singlepart(SinglePart::html(h));
+        for img in used {
+            let bytes = std::fs::read(&img.path).map_err(|_| crate::error::msg(format!("Immagine «{}» non più disponibile", img.name)))?;
+            let ctype = ContentType::parse(&img.mime).map_err(|_| crate::error::msg("Tipo di immagine non valido"))?;
+            related = related.singlepart(Attachment::new_inline_with_name(img.cid.clone(), img.name.clone()).body(bytes, ctype));
+        }
+        Ok(MultiPart::alternative().singlepart(SinglePart::plain(body.clone())).multipart(related))
+    };
     if out.attachments.is_empty() {
         return Ok(match html {
-            Some(h) => b.multipart(MultiPart::alternative_plain_html(body, h))?,
+            Some(h) => b.multipart(alternative(h)?)?,
             None => b.header(ContentType::TEXT_PLAIN).body(body)?,
         });
     }
     let mut parts = match html {
-        Some(h) => MultiPart::mixed().multipart(MultiPart::alternative_plain_html(body, h)),
-        None => MultiPart::mixed().singlepart(SinglePart::plain(body)),
+        Some(h) => MultiPart::mixed().multipart(alternative(h)?),
+        None => MultiPart::mixed().singlepart(SinglePart::plain(body.clone())),
     };
     for path in &out.attachments {
         let bytes = std::fs::read(path)?;
@@ -217,6 +274,7 @@ mod tests {
             quote_html: None,
             signature: None,
             signature_html: None,
+            inline_images: vec![],
         }
     }
 
@@ -271,6 +329,24 @@ mod tests {
         o.signature_html = Some("<p></p>".into());
         let raw = String::from_utf8(build(&account(), &o).unwrap().formatted()).unwrap();
         assert!(!raw.contains("-- ") && !raw.contains("text/html") && !raw.contains("La mia firma"));
+    }
+
+    #[test]
+    fn immagini_nel_testo() {
+        assert_eq!(plain_images("Ecco ![grafico](cid:a1) e ![](cid:b2) fine"), "Ecco [immagine: grafico] e [immagine] fine");
+        assert_eq!(plain_images("![non chiuso](cid:x"), "![non chiuso](cid:x");
+        let dir = std::env::temp_dir().join(format!("missiva-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("g.png");
+        std::fs::write(&path, b"\x89PNG").unwrap();
+        let mut o = outgoing(&["a@b.it"]);
+        o.body = "Vedi ![g](cid:img1)".into();
+        o.html = Some("<p>Vedi <img src=\"cid:img1\"></p>".into());
+        o.inline_images = vec![InlineImage { cid: "img1".into(), path: path.to_string_lossy().into(), mime: "image/png".into(), name: "g.png".into() }];
+        let raw = String::from_utf8(build(&account(), &o).unwrap().formatted()).unwrap();
+        assert!(raw.contains("multipart/related") && raw.contains("Content-ID: <img1>"), "{raw}");
+        assert!(raw.contains("Vedi [immagine: g]"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

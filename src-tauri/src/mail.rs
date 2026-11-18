@@ -436,6 +436,73 @@ pub fn attachment_files(bytes: &[u8], indexes: &[usize]) -> Result<Vec<String>> 
         .collect()
 }
 
+/// Immagine nel testo di un messaggio che si sta scrivendo: copia in cache e anteprima per l'editor.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineImageFile {
+    pub path: String,
+    pub name: String,
+    pub mime: String,
+    /// Anteprima `data:` da mostrare nell'editor.
+    pub url: String,
+}
+
+/// Oltre questa dimensione un'immagine non va nel testo: meglio allegarla.
+const INLINE_IMAGE_MAX: usize = 10 * 1024 * 1024;
+/// Le immagini restano finché servono a bozze e messaggi programmati, poi si eliminano.
+const INLINE_IMAGE_MAX_AGE: Duration = Duration::from_secs(180 * 24 * 3600);
+
+/// Tipo di un'immagine dal nome: solo i formati che tutti i programmi di posta mostrano.
+pub fn image_mime(name: &str) -> Option<&'static str> {
+    let ext = Path::new(name).extension()?.to_string_lossy().to_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => return None,
+    })
+}
+
+fn inline_root() -> Result<PathBuf> {
+    let root = cache_dir()?.join("inline");
+    fs::create_dir_all(&root)?;
+    Ok(root)
+}
+
+/// Copia l'immagine nella cache: bozze e messaggi programmati la ritrovano anche se l'originale sparisce.
+pub fn store_inline_image(name: &str, bytes: &[u8]) -> Result<InlineImageFile> {
+    let name = safe_name(name);
+    let mime = image_mime(&name).ok_or_else(|| msg("Formato immagine non supportato: usa PNG, JPEG, GIF, WebP o BMP"))?;
+    if bytes.len() > INLINE_IMAGE_MAX {
+        return Err(msg("Immagine troppo grande per il testo (massimo 10 MB): allegala"));
+    }
+    let root = inline_root()?;
+    for entry in fs::read_dir(&root).into_iter().flatten().flatten() {
+        let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > INLINE_IMAGE_MAX_AGE);
+        if old {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+    let dir = root.join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(&name);
+    fs::write(&path, bytes)?;
+    Ok(InlineImageFile { path: path.to_string_lossy().into_owned(), name, mime: mime.into(), url: format!("data:{mime};base64,{}", STANDARD.encode(bytes)) })
+}
+
+/// Anteprima di un'immagine già in cache, per riaprire una bozza; fuori dalla cache si rifiuta.
+pub fn inline_image_url(path: &str) -> Result<String> {
+    let root = inline_root()?.canonicalize()?;
+    let path = Path::new(path).canonicalize().map_err(|_| msg("Immagine non più disponibile"))?;
+    if !path.starts_with(&root) {
+        return Err(msg("Immagine fuori dalla cartella di Missiva"));
+    }
+    let mime = image_mime(&path.to_string_lossy()).ok_or_else(|| msg("Formato immagine non supportato"))?;
+    Ok(format!("data:{mime};base64,{}", STANDARD.encode(fs::read(path)?)))
+}
+
 fn cache_dir() -> Result<PathBuf> {
     let dir = dirs::cache_dir().ok_or_else(|| msg("Cartella cache non trovata"))?.join("missiva");
     fs::create_dir_all(&dir)?;

@@ -1,6 +1,6 @@
 [package]
 name = "missiva"
-version = "0.9.0"
+version = "0.10.0"
 description = "Missiva — client email per Linux"
 edition = "2021"
 
