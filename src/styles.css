@@ -636,6 +636,9 @@ button.tree-toggle:hover { color: var(--text); background: var(--fill); }
 .compose-body::placeholder { color: var(--paper-muted); }
 .signature { display: flex; flex-direction: column; gap: 2px; padding-top: 14px; border-top: 1px dashed var(--paper-line); font-size: 13.5px; line-height: 1.5; color: var(--paper-muted); white-space: pre-wrap; }
 .signature strong { color: var(--paper-ink); font-weight: 600; }
+.signature-html { white-space: normal; }
+.signature-html p, .signature-html ul { margin: 0; }
+.signature-html a { color: inherit; }
 .file-chips { display: flex; gap: 8px; flex-wrap: wrap; }
 .file-chip { display: inline-flex; align-items: center; gap: 10px; height: 40px; padding: 0 6px; border-radius: 10px; background: var(--paper-chip); box-shadow: inset 0 0 0 1px var(--paper-line); font-size: 13px; }
 .file-chip .file-tile { width: 28px; height: 28px; font-size: 9px; }

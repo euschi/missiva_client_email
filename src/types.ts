@@ -268,4 +268,6 @@ export interface Draft {
   draftId?: string | null;
   /** Id del messaggio programmato che questa bozza sostituisce. */
   replaces?: string;
+  /** Firma scelta: "default", "none" o l'id di una firma alternativa. */
+  signatureId?: string;
 }

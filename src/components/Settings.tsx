@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errorText, inTauri } from "../api";
 import { monoOf, plural } from "../format";
 import { Icon, type IconName } from "../icons";
@@ -235,14 +235,28 @@ function Accounts({ accounts, onAccountChanged, onAccountRemoved, onAddAccount }
   );
 }
 
+type AccountFields = Omit<AccountPatch, "id">;
+type SignatureList = NonNullable<Account["signatures"]>;
+
+/** Attesa dopo l'ultimo tasto prima di salvare una firma. */
+const SIGNATURE_SAVE_MS = 600;
+
 function AccountCard({ account: a, onChanged, onRemoved }: { account: Account; onChanged: (a: Account) => void; onRemoved: (id: string) => void }) {
   const [name, setName] = useState(a.name);
   const [displayName, setDisplayName] = useState(a.displayName);
   const [signature, setSignature] = useState(a.signature);
+  const [signatures, setSignatures] = useState<SignatureList>(a.signatures ?? []);
   const [confirm, setConfirm] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const save = async (patch: Omit<AccountPatch, "id">) => {
+  // Le firme si salvano mentre si scrive: le modifiche in sospeso si uniscono in una sola
+  // richiesta e i salvataggi partono in fila, così uno vecchio non sovrascrive uno nuovo.
+  const signaturesRef = useRef(signatures);
+  const pending = useRef<AccountFields>({});
+  const timer = useRef<number | undefined>(undefined);
+  const queue = useRef<Promise<void>>(Promise.resolve());
+
+  const save = async (patch: AccountFields) => {
     try {
       setError(null);
       onChanged(await api.updateAccount({ id: a.id, ...patch }));
@@ -250,9 +264,49 @@ function AccountCard({ account: a, onChanged, onRemoved }: { account: Account; o
       setError(errorText(e));
     }
   };
+  const saveRef = useRef(save);
+  saveRef.current = save;
+
+  const enqueue = (patch: AccountFields) => {
+    queue.current = queue.current.then(() => saveRef.current(patch));
+  };
+
+  const flush = () => {
+    window.clearTimeout(timer.current);
+    const patch = pending.current;
+    if (Object.keys(patch).length === 0) return;
+    pending.current = {};
+    enqueue(patch);
+  };
+  const flushRef = useRef(flush);
+  flushRef.current = flush;
+  // Chiudere le impostazioni senza uscire dal campo non perde quel che si è scritto.
+  useEffect(() => () => flushRef.current(), []);
+
+  const saveSoon = (patch: AccountFields) => {
+    pending.current = { ...pending.current, ...patch };
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(flush, SIGNATURE_SAVE_MS);
+  };
+
+  const editSignature = (text: string) => {
+    setSignature(text);
+    saveSoon({ signature: text });
+  };
+
+  /** Cambia l'elenco partendo sempre dall'ultima versione, non da quella del render. */
+  const editSignatures = (change: (list: SignatureList) => SignatureList, now = false) => {
+    const next = change(signaturesRef.current);
+    signaturesRef.current = next;
+    setSignatures(next);
+    saveSoon({ signatures: next });
+    if (now) flush();
+  };
 
   const remove = async () => {
     try {
+      window.clearTimeout(timer.current);
+      pending.current = {};
       await api.removeAccount(a.id);
       onRemoved(a.id);
     } catch (e) {
@@ -272,23 +326,33 @@ function AccountCard({ account: a, onChanged, onRemoved }: { account: Account; o
       <div className="grid-2">
         <label className="field">
           <span>Nome nella barra laterale</span>
-          <input className="input" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => name !== a.name && save({ name })} />
+          <input
+            className="input"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onBlur={() => (name.trim() ? name !== a.name && enqueue({ name }) : setName(a.name))}
+          />
         </label>
         <label className="field">
           <span>Nome del mittente</span>
-          <input className="input" value={displayName} onChange={(e) => setDisplayName(e.target.value)} onBlur={() => displayName !== a.displayName && save({ displayName })} />
+          <input
+            className="input"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            onBlur={() => (displayName.trim() ? displayName !== a.displayName && enqueue({ displayName }) : setDisplayName(a.displayName))}
+          />
         </label>
       </div>
       <label className="field">
         <span>Firma</span>
-        <textarea className="input" rows={2} value={signature} onChange={(e) => setSignature(e.target.value)} onBlur={() => signature !== a.signature && save({ signature })} />
+        <textarea className="input" rows={2} value={signature} onChange={(e) => editSignature(e.target.value)} onBlur={flush} />
       </label>
-      <Signatures account={a} onSave={(signatures) => save({ signatures })} />
+      <Signatures list={signatures} onEdit={editSignatures} onBlur={flush} />
       {error && <div className="status error" role="alert"><span>{error}</span></div>}
       <div className="acct-card-foot">
         <div role="radiogroup" aria-label={`Colore di ${a.name}`} className="color-dots">
           {ACCOUNT_COLORS.map((c) => (
-            <button key={c} type="button" role="radio" aria-checked={a.color === c} aria-label={c} style={{ background: c }} onClick={() => save({ color: c })} />
+            <button key={c} type="button" role="radio" aria-checked={a.color === c} aria-label={c} style={{ background: c }} onClick={() => enqueue({ color: c })} />
           ))}
         </div>
         {confirm ? (
@@ -307,9 +371,17 @@ function AccountCard({ account: a, onChanged, onRemoved }: { account: Account; o
   );
 }
 
+/** Primo nome libero tra "Firma 2", "Firma 3"…: la predefinita è la numero 1. */
+function freeSignatureName(list: SignatureList, except?: string): string {
+  const used = new Set(list.filter((x) => x.id !== except).map((x) => x.name.trim().toLowerCase()));
+  let n = 2;
+  while (used.has(`firma ${n}`)) n++;
+  return `Firma ${n}`;
+}
+
 /** Firme alternative di un account, tra cui scegliere nella finestra Scrivi. */
-function Signatures({ account, onSave }: { account: Account; onSave: (list: NonNullable<Account["signatures"]>) => void }) {
-  const list = account.signatures ?? [];
+function Signatures({ list, onEdit, onBlur }: { list: SignatureList; onEdit: (change: (list: SignatureList) => SignatureList, now?: boolean) => void; onBlur: () => void }) {
+  const set = (id: string, field: "name" | "text", value: string) => onEdit((l) => l.map((y) => (y.id === id ? { ...y, [field]: value } : y)));
   return (
     <div className="stack-10">
       {list.map((x) => (
@@ -317,22 +389,26 @@ function Signatures({ account, onSave }: { account: Account; onSave: (list: NonN
           <input
             className="input"
             aria-label="Nome della firma"
-            defaultValue={x.name}
-            onBlur={(e) => e.target.value.trim() && e.target.value !== x.name && onSave(list.map((y) => (y.id === x.id ? { ...y, name: e.target.value.trim() } : y)))}
+            value={x.name}
+            onChange={(e) => set(x.id, "name", e.target.value)}
+            onBlur={() =>
+              x.name.trim()
+                ? onBlur()
+                : onEdit((l) => l.map((y) => (y.id === x.id ? { ...y, name: freeSignatureName(l, x.id) } : y)), true)
+            }
           />
-          <textarea
-            className="input"
-            rows={2}
-            aria-label={`Testo della firma ${x.name}`}
-            defaultValue={x.text}
-            onBlur={(e) => e.target.value !== x.text && onSave(list.map((y) => (y.id === x.id ? { ...y, text: e.target.value } : y)))}
-          />
-          <button type="button" className="icon-btn" aria-label={`Elimina la firma ${x.name}`} title="Elimina" onClick={() => onSave(list.filter((y) => y.id !== x.id))}>
+          <textarea className="input" rows={2} aria-label={`Testo della firma ${x.name}`} value={x.text} onChange={(e) => set(x.id, "text", e.target.value)} onBlur={onBlur} />
+          <button type="button" className="icon-btn" aria-label={`Elimina la firma ${x.name}`} title="Elimina" onClick={() => onEdit((l) => l.filter((y) => y.id !== x.id), true)}>
             <Icon name="trash" size={15} stroke={1.8} />
           </button>
         </div>
       ))}
-      <button type="button" className="btn btn-soft btn-sm" style={{ alignSelf: "flex-start" }} onClick={() => onSave([...list, { id: crypto.randomUUID(), name: `Firma ${list.length + 2}`, text: "" }])}>
+      <button
+        type="button"
+        className="btn btn-soft btn-sm"
+        style={{ alignSelf: "flex-start" }}
+        onClick={() => onEdit((l) => [...l, { id: crypto.randomUUID(), name: freeSignatureName(l), text: "" }], true)}
+      >
         <Icon name="plus" size={14} stroke={2} />
         Aggiungi un'altra firma
       </button>
