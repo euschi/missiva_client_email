@@ -59,6 +59,28 @@ pub struct Account {
     pub signatures: Vec<Signature>,
 }
 
+/// Firme alternative pronte da salvare: nomi senza spazi ai bordi, mai vuoti né ripetuti, id unici.
+pub fn clean_signatures(list: Vec<Signature>) -> Vec<Signature> {
+    let mut out: Vec<Signature> = Vec::with_capacity(list.len());
+    for mut s in list {
+        if s.id.trim().is_empty() || out.iter().any(|o| o.id == s.id) {
+            continue;
+        }
+        s.name = s.name.trim().to_string();
+        let taken = |name: &str, out: &[Signature]| out.iter().any(|o| o.name.eq_ignore_ascii_case(name));
+        if s.name.is_empty() || taken(&s.name, &out) {
+            let base = if s.name.is_empty() { "Firma".to_string() } else { s.name.clone() };
+            let mut n = 2;
+            while taken(&format!("{base} {n}"), &out) {
+                n += 1;
+            }
+            s.name = format!("{base} {n}");
+        }
+        out.push(s);
+    }
+    out
+}
+
 /// Colori assegnati in ordine ai nuovi account, come nel design.
 const PALETTE: [&str; 6] = ["#F2A65A", "#7AB0FF", "#C7B5FF", "#7EE0B5", "#FF8F7A", "#8FD3FF"];
 
@@ -106,5 +128,21 @@ pub fn default_name(provider: Provider, email: &str) -> String {
         Provider::Google => "Google".into(),
         Provider::Microsoft => "Microsoft".into(),
         Provider::Imap => email.rsplit('@').next().unwrap_or(email).to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sig(id: &str, name: &str) -> Signature {
+        Signature { id: id.into(), name: name.into(), text: String::new() }
+    }
+
+    #[test]
+    fn firme_con_nomi_vuoti_o_ripetuti() {
+        let out = clean_signatures(vec![sig("1", " Lavoro "), sig("2", ""), sig("3", "lavoro"), sig("1", "Doppia"), sig("", "Senza id")]);
+        let names: Vec<_> = out.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Lavoro", "Firma 2", "lavoro 2"]);
     }
 }

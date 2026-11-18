@@ -163,7 +163,7 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
   const [later, setLater] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [keepQuote, setKeepQuote] = useState(true);
-  const [signatureId, setSignatureId] = useState("default");
+  const [signatureId, setSignatureId] = useState(draft.signatureId ?? "default");
   const [templatesOpen, setTemplatesOpen] = useState(false);
   const [templateName, setTemplateName] = useState("");
   const [dropping, setDropping] = useState(false);
@@ -182,8 +182,12 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
 
   const formatted = hasFormatting(body);
 
+  const alternatives = from?.signatures ?? [];
+  // Cambiando mittente una firma dell'altro account non vale più: si torna alla predefinita.
+  const chosenSignature = signatureId === "none" || alternatives.some((x) => x.id === signatureId) ? signatureId : "default";
   const signatureText =
-    signatureId === "none" ? "" : (from?.signatures ?? []).find((x) => x.id === signatureId)?.text ?? from?.signature ?? "";
+    chosenSignature === "none" ? "" : (alternatives.find((x) => x.id === chosenSignature)?.text ?? from?.signature ?? "");
+  const signatureFormatted = hasFormatting(signatureText);
 
   // Il Message-ID resta lo stesso per tutta la bozza: è ciò che lega i salvataggi successivi.
   const messageId = useRef(draft.draftId ?? `${crypto.randomUUID()}@${from?.email.split("@")[1] || "missiva.local"}`);
@@ -202,9 +206,9 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
     quote: keepQuote ? (draft.quote ?? null) : null,
     quoteHtml: keepQuote ? (draft.quoteHtml ?? null) : null,
     signature: signatureText,
-    signatureHtml: hasFormatting(signatureText) ? toHtml(signatureText) : null,
+    signatureHtml: signatureFormatted ? toHtml(signatureText) : null,
   });
-  const snapshot = JSON.stringify([from?.id, to, cc, bcc, subject, body, files, keepQuote, signatureId]);
+  const snapshot = JSON.stringify([from?.id, to, cc, bcc, subject, body, files, keepQuote, chosenSignature]);
   // Stato dell'ultimo render, per chi legge dopo un'attesa: conferma dei destinatari al blur compresa.
   const latest = useRef({ outgoing, snapshot });
   latest.current = { outgoing, snapshot };
@@ -531,26 +535,27 @@ export function Compose({ accounts, draft, onClose, onQueued, sendDelay, templat
                 onFocus={(e) => draft.inReplyTo && e.currentTarget.setSelectionRange(0, 0)}
               />
             </label>
-            {(signatureText.trim() || (from?.signatures ?? []).length > 0) && (
+            {(signatureText.trim() || alternatives.length > 0) && (
               <div className="signature">
-                {(from?.signatures ?? []).length > 0 && (
+                {alternatives.length > 0 && (
                   <label className="signature-pick">
                     <span className="sr-only">Firma</span>
-                    <select value={signatureId} onChange={(e) => setSignatureId(e.target.value)}>
+                    <select value={chosenSignature} onChange={(e) => setSignatureId(e.target.value)}>
                       <option value="default">Firma predefinita</option>
-                      {(from?.signatures ?? []).map((x) => (
+                      {alternatives.map((x) => (
                         <option key={x.id} value={x.id}>{x.name}</option>
                       ))}
                       <option value="none">Nessuna firma</option>
                     </select>
                   </label>
                 )}
-                {signatureText.trim() && (
-                  <>
-                    <strong>{from?.displayName}</strong>
-                    <span>{signatureText}</span>
-                  </>
-                )}
+                {/* Anteprima fedele a ciò che parte: niente nome del mittente, formattazione resa. */}
+                {signatureText.trim() &&
+                  (signatureFormatted ? (
+                    <span className="signature-html" dangerouslySetInnerHTML={{ __html: toHtml(signatureText) }} />
+                  ) : (
+                    <span>{signatureText.trim()}</span>
+                  ))}
               </div>
             )}
             {draft.quote && keepQuote && (

@@ -101,19 +101,21 @@ fn assemble(b: lettre::message::MessageBuilder, acc: &Account, out: &Outgoing, w
         b = b.references(refs.join(" "));
     }
 
-    let signature = out.signature.as_deref().unwrap_or(&acc.signature);
+    let signature = out.signature.as_deref().unwrap_or(&acc.signature).trim_end();
     let signed = with_signature && !signature.trim().is_empty();
-    let mut body = out.body.clone();
+    let signature_html = out.signature_html.as_deref().filter(|_| signed);
+    let mut body = out.body.trim_end().to_string();
     if signed {
         body = format!("{body}\n\n-- \n{signature}");
     }
     if let Some(quote) = &out.quote {
         body = format!("{body}\n\n{quote}");
     }
-    let html = (out.html.is_some() || out.quote_html.is_some()).then(|| {
+    // Basta una firma formattata per spedire anche l'HTML: altrimenti arriverebbero gli asterischi.
+    let html = (out.html.is_some() || out.quote_html.is_some() || signature_html.is_some()).then(|| {
         let main = out.html.clone().unwrap_or_else(|| escape_html(&out.body).replace('\n', "<br>"));
         let sig = if signed {
-            let content = out.signature_html.clone().unwrap_or_else(|| escape_html(signature).replace('\n', "<br>"));
+            let content = signature_html.map(str::to_string).unwrap_or_else(|| escape_html(signature).replace('\n', "<br>"));
             format!("<div style=\"color:#666\">-- <br>{content}</div>")
         } else {
             String::new()
@@ -250,6 +252,24 @@ mod tests {
         let raw = String::from_utf8(build(&account(), &o).unwrap().formatted()).unwrap().replace("=\r\n", "");
         assert!(raw.contains("Firma due") && !raw.contains("La mia firma"));
         assert!(raw.contains("text/html") && raw.contains("vecchio"));
+    }
+
+    #[test]
+    fn firma_formattata_anche_con_testo_semplice() {
+        let mut o = outgoing(&["a@b.it"]);
+        o.signature = Some("**Io**".into());
+        o.signature_html = Some("<p><strong>Io</strong></p>".into());
+        let raw = String::from_utf8(build(&account(), &o).unwrap().formatted()).unwrap().replace("=\r\n", "");
+        assert!(raw.contains("text/html") && raw.contains("<strong>Io</strong>"));
+    }
+
+    #[test]
+    fn senza_firma_niente_separatore() {
+        let mut o = outgoing(&["a@b.it"]);
+        o.signature = Some("  \n".into());
+        o.signature_html = Some("<p></p>".into());
+        let raw = String::from_utf8(build(&account(), &o).unwrap().formatted()).unwrap();
+        assert!(!raw.contains("-- ") && !raw.contains("text/html") && !raw.contains("La mia firma"));
     }
 
     #[test]
