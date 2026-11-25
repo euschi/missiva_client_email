@@ -89,9 +89,11 @@ interface LabelPickerProps {
   selected: string[];
   onToggle: (id: string) => void;
   onCreate: (name: string) => void;
+  /** Se presente, offre di creare una regola che applica l'etichetta in automatico. */
+  onRule?: () => void;
 }
 
-export function LabelPicker({ labels, selected, onToggle, onCreate }: LabelPickerProps) {
+export function LabelPicker({ labels, selected, onToggle, onCreate, onRule }: LabelPickerProps) {
   const [name, setName] = useState("");
   const existing = labels.find((l) => l.name.toLowerCase() === name.trim().toLowerCase());
   const submit = () => {
@@ -125,6 +127,12 @@ export function LabelPicker({ labels, selected, onToggle, onCreate }: LabelPicke
           </button>
         );
       })}
+      {onRule && (
+        <button type="button" className="pop-item gap" onClick={onRule}>
+          <span>Etichetta in automatico…</span>
+          <Icon name="filter" size={15} stroke={1.8} />
+        </button>
+      )}
     </>
   );
 }
