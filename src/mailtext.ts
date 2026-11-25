@@ -16,7 +16,10 @@ function isoDate(text: string): string | null {
  */
 export function parseSearch(raw: string): SearchQuery {
   const q: SearchQuery = { words: [], from: [], to: [], subject: [], after: null, before: null, unread: false, flagged: false, attachment: false };
-  for (const match of raw.matchAll(/(?:([\p{L}]+):)?(?:"([^"]*)"|(\S+))/gu)) {
+  // «da: mario» vale come «da:mario»: lo spazio dopo i due punti si toglie solo per i filtri noti,
+  // così un testo come «Nota: importante» resta due parole.
+  const text = raw.replace(/(?<![\p{L}\d])(da|a|oggetto|dopo|prima|ha|stato):\s+(?=\S)/giu, "$1:");
+  for (const match of text.matchAll(/(?:([\p{L}]+):)?(?:"([^"]*)"|(\S+))/gu)) {
     const key = match[1]?.toLowerCase();
     const value = match[2] ?? match[3] ?? "";
     if (!value) continue;
