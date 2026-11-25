@@ -422,17 +422,27 @@ export function App() {
         : view === "inbox"
           ? uniqueById([...inbox, ...older.filter((m) => !snoozeOf(m))])
           : uniqueById([...(byFolder[folderOf(view)] ?? []), ...older]);
-  const visible = source.filter(
+  // Tutto tranne il filtro etichetta: da qui vengono anche i contatori delle etichette.
+  const unlabeled = source.filter(
     (m) =>
       accountsById[m.accountId] &&
       !isHidden(m) &&
       (box || accountFilter === "all" || m.accountId === accountFilter) &&
       (box || searching || view !== "flagged" || m.flagged) &&
-      (!labelFilter || labelsOf(m).some((l) => l.id === labelFilter)) &&
       (chip !== "unread" || m.unread) &&
       (chip !== "attach" || m.attachments.length > 0) &&
       (!q || searching || matchesSearch(m, parsedQuery)),
   );
+  const visible = labelFilter ? unlabeled.filter((m) => labels.byMessage[keyOf(m)]?.includes(labelFilter)) : unlabeled;
+  // Per etichetta, quanti messaggi si vedono cliccandola e quanti sono da leggere.
+  const labelCounts: Record<string, number> = {};
+  const labelUnread: Record<string, number> = {};
+  for (const m of unlabeled) {
+    for (const id of labels.byMessage[keyOf(m)] ?? []) {
+      labelCounts[id] = (labelCounts[id] ?? 0) + 1;
+      if (m.unread) labelUnread[id] = (labelUnread[id] ?? 0) + 1;
+    }
+  }
   const selected = visible.find((m) => m.id === selectedId) ?? visible[0] ?? null;
   const chosen = checked.length ? visible.filter((m) => checked.includes(m.id)) : [];
   const bulk = chosen.length ? chosen : null;
@@ -459,22 +469,6 @@ export function App() {
     scheduled: scheduled.length,
     drafts: (byFolder.drafts ?? []).filter(known).length,
   };
-  const labelCounts = Object.fromEntries(labels.defs.map((l) => [l.id, Object.values(labels.byMessage).filter((ids) => ids.includes(l.id)).length]));
-  // Da leggere per etichetta: messaggi scaricati e non letti, contati una volta sola anche se in più cartelle.
-  const labelUnread = useMemo(() => {
-    const seen = new Set<string>();
-    const out: Record<string, number> = {};
-    for (const [folder, list] of Object.entries(byFolder)) {
-      if (folder === "trash" || folder === "sent" || folder === "drafts") continue;
-      for (const m of list ?? []) {
-        const k = keyOf(m);
-        if (!m.unread || seen.has(k) || !accountsById[m.accountId]) continue;
-        seen.add(k);
-        for (const id of labels.byMessage[k] ?? []) out[id] = (out[id] ?? 0) + 1;
-      }
-    }
-    return out;
-  }, [byFolder, labels.byMessage, accountsById]);
 
   // Allo scadere del posticipo il messaggio torna in arrivo come non letto, con notifica.
   useEffect(() => {
@@ -1133,8 +1127,9 @@ export function App() {
   /** Applica le regole attive ai messaggi appena arrivati. Restituisce quelli da non notificare. */
   runRulesRef.current = (added) => applyRules(added, rules.filter(ruleActive)).handled;
 
-  /** Tutti i messaggi già scaricati, da qualunque cartella aperta. */
-  const loadedMessages = () => Object.values(byFolder).flatMap((list) => list ?? []);
+  /** Messaggi ricevuti già scaricati: le regole non toccano Inviati, Bozze e Cestino. */
+  const loadedMessages = () =>
+    uniqueById(Object.values(byFolder).flatMap((list) => list ?? [])).filter((m) => !["sent", "drafts", "trash"].includes(m.folder));
 
   /** Regola sull'etichetta proposta dal messaggio: stesso mittente, stesso account. */
   const labelRuleDraft = (m: Message): Partial<Rule> => ({

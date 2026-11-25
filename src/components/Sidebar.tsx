@@ -48,7 +48,7 @@ interface Props {
   onEmptyTrash: (accountId: string | null) => void;
   labels: Label[];
   labelCounts: Record<string, number>;
-  /** Messaggi non letti per etichetta. */
+  /** Per etichetta: messaggi della vista corrente (labelCounts) e quanti sono da leggere. */
   labelUnread: Record<string, number>;
   labelFilter: string | null;
   onLabelFilter: (id: string | null) => void;
@@ -228,7 +228,7 @@ export function Sidebar(p: Props) {
                 className={unread ? "nav-item label-item unread" : "nav-item label-item"}
                 aria-pressed={p.labelFilter === l.id}
                 aria-current={p.labelFilter === l.id}
-                title={`${l.name}: ${total === 1 ? "1 messaggio" : `${total} messaggi`}${unread ? `, ${unread} da leggere` : ""}`}
+                title={`${l.name}: ${total === 1 ? "1 messaggio" : `${total} messaggi`} in questa vista${unread ? `, ${unread} da leggere` : ""}`}
                 onClick={() => p.onLabelFilter(p.labelFilter === l.id ? null : l.id)}
               >
                 <i className="label-dot lg" style={{ background: l.color }} />
