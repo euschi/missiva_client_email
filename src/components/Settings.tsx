@@ -5,7 +5,7 @@ import { Icon, type IconName } from "../icons";
 import { notificationsAllowed, notifyTest } from "../notify";
 import { SHORTCUTS } from "../shortcuts";
 import { forgetTools, joinCommand, pairsText, parsePairs, parseServersJson, splitCommand, type McpAction } from "../mcp";
-import { LABEL_COLORS, MOVING_ACTIONS, ruleActive, type Labels, type Rule } from "../store";
+import { LABEL_COLORS, MOVING_ACTIONS, ruleActive, type Labels, type Rule, type RulePlan } from "../store";
 import { PRESETS, accentOf, inkFor, isHex, type Density, type Prefs, type Reader } from "../prefs";
 import { version } from "../../package.json";
 import type { Account, AccountPatch, Mailbox, McpServer } from "../types";
@@ -43,10 +43,8 @@ interface Props {
   onRules: (r: Rule[]) => void;
   /** Regola da completare, proposta dal menu di un messaggio. */
   ruleDraft?: Partial<Rule>;
-  /** Quanti messaggi già scaricati cambierebbero applicando ora la regola. */
-  countRule: (r: Rule) => number;
-  /** Applica subito la regola ai messaggi già scaricati; restituisce quanti ne ha cambiati. */
-  onApplyRule: (r: Rule) => number;
+  /** Cerca sul server i messaggi della regola e prepara «Applica ora». */
+  prepareRule: (r: Rule) => Promise<RulePlan>;
   mailboxes: Record<string, Mailbox[]>;
   mcpActions: McpAction[];
   onMcpActions: (a: McpAction[]) => void;
@@ -82,7 +80,7 @@ export function Settings(p: Props) {
           {section === "look" && <Look prefs={p.prefs} onPrefs={p.onPrefs} />}
           {section === "mail" && <MailSection prefs={p.prefs} onPrefs={p.onPrefs} />}
           {section === "rules" && (
-            <RulesSection rules={p.rules} onRules={p.onRules} labels={p.labels} accounts={p.accounts} mailboxes={p.mailboxes} draft={ruleDraft} countRule={p.countRule} onApplyRule={p.onApplyRule} />
+            <RulesSection rules={p.rules} onRules={p.onRules} labels={p.labels} accounts={p.accounts} mailboxes={p.mailboxes} draft={ruleDraft} prepareRule={p.prepareRule} />
           )}
           {section === "labels" && <LabelsSection labels={p.labels} onLabels={p.onLabels} rules={p.rules} onRules={p.onRules} onNewRule={(labelId) => go("rules", { action: "label", labelId })} />}
           {section === "mcp" && <McpSection actions={p.mcpActions} onActions={p.onMcpActions} />}
@@ -740,14 +738,13 @@ interface RulesSectionProps {
   accounts: Account[];
   mailboxes: Record<string, Mailbox[]>;
   draft?: Partial<Rule>;
-  countRule: (r: Rule) => number;
-  onApplyRule: (r: Rule) => number;
+  prepareRule: (r: Rule) => Promise<RulePlan>;
 }
 
-/** Esito di "Applica ora" su una regola: conferma attesa per gli spostamenti, oppure risultato. */
-type ApplyState = { id: string; confirm: number } | { id: string; done: number } | null;
+/** «Applica ora» su una regola: ricerca sul server in corso, conferma attesa, oppure risultato. */
+type ApplyState = { id: string; busy: true } | { id: string; plan: RulePlan } | { id: string; done: number; errors: string[] } | null;
 
-function RulesSection({ rules, onRules, labels, accounts, mailboxes, draft, countRule, onApplyRule }: RulesSectionProps) {
+function RulesSection({ rules, onRules, labels, accounts, mailboxes, draft, prepareRule }: RulesSectionProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [field, setField] = useState<Rule["field"]>(draft?.field ?? "from");
   const [contains, setContains] = useState(draft?.contains ?? "");
@@ -804,17 +801,20 @@ function RulesSection({ rules, onRules, labels, accounts, mailboxes, draft, coun
     onRules(rules.filter((x) => x.id !== id));
     if (editingId === id) reset();
   };
-  const applyNow = (r: Rule) => {
-    // Spostare o cestinare posta già arrivata va confermato, e prima si dice quanta.
-    if (MOVING_ACTIONS.includes(r.action)) setApply({ id: r.id, confirm: countRule(r) });
-    else setApply({ id: r.id, done: onApplyRule(r) });
+  /** Cerca sul server e mostra quanti messaggi cambierebbero: si applica solo dopo la conferma. */
+  const applyNow = async (r: Rule) => {
+    setApply({ id: r.id, busy: true });
+    const plan = await prepareRule(r);
+    // Nel frattempo si può aver chiesto altro: vale solo se si aspetta ancora questa regola.
+    setApply((cur) => (cur?.id === r.id && "busy" in cur ? (plan.changes ? { id: r.id, plan } : { id: r.id, done: 0, errors: plan.errors }) : cur));
   };
+  const scope = (r: Rule) => (MOVING_ACTIONS.includes(r.action) ? "in posta in arrivo" : "in tutta la posta ricevuta");
 
   return (
     <>
       <Head
         title="Regole"
-        text="Valgono per i nuovi messaggi in arrivo mentre Missiva è aperta, anche solo nell'area di notifica, nell'ordine dell'elenco. Con «Applica ora» una regola agisce anche sui messaggi già scaricati."
+        text="Valgono per i nuovi messaggi in arrivo mentre Missiva è aperta, anche solo nell'area di notifica, nell'ordine dell'elenco. «Applica ora» cerca sul server in tutta la posta ricevuta, anche quella vecchia; gli spostamenti valgono solo per la posta in arrivo. Prima di applicare dice quanti messaggi cambiano."
       />
       {rules.length > 0 && (
         <div className="settings-list">
@@ -826,28 +826,35 @@ function RulesSection({ rules, onRules, labels, accounts, mailboxes, draft, coun
                 <input type="checkbox" role="switch" className="switch" aria-label="Regola attiva" title={on ? "Attiva: clic per sospenderla" : "Sospesa: clic per attivarla"} checked={on} onChange={(e) => patch(r.id, { enabled: e.target.checked ? undefined : false })} />
                 <span className={on ? "setting-text" : "setting-text muted"}>
                   {ruleText(r, labels, accounts)}
+                  {state && "busy" in state && (
+                    <span className="setting-desc" role="status">
+                      Cerco sul server {scope(r)}…
+                    </span>
+                  )}
+                  {state && "plan" in state && (
+                    <span className="rule-confirm" role="status">
+                      <span className="setting-desc">
+                        {plural(state.plan.total, "messaggio trovato", "messaggi trovati")} {scope(r)}
+                        {state.plan.changes < state.plan.total ? `, ${state.plan.changes} da cambiare` : ""}.
+                      </span>
+                      <button type="button" className="btn btn-primary btn-sm" onClick={() => setApply({ id: r.id, done: state.plan.apply(), errors: state.plan.errors })}>
+                        Applica a {plural(state.plan.changes, "messaggio", "messaggi")}
+                      </button>
+                      <button type="button" className="btn btn-soft btn-sm" onClick={() => setApply(null)}>
+                        Annulla
+                      </button>
+                    </span>
+                  )}
                   {state && "done" in state && (
                     <span className="setting-desc" role="status">
-                      {state.done ? `Applicata a ${plural(state.done, "messaggio", "messaggi")} già scaricati.` : "Nessun messaggio già scaricato da cambiare."}
+                      {state.done ? `Applicata a ${plural(state.done, "messaggio", "messaggi")}.` : `Nessun messaggio da cambiare ${scope(r)}.`}
                     </span>
                   )}
-                  {state && "confirm" in state && (
-                    <span className="rule-confirm" role="status">
-                      {state.confirm ? (
-                        <>
-                          <span className="setting-desc">Coinvolge {plural(state.confirm, "messaggio", "messaggi")} in posta in arrivo.</span>
-                          <button type="button" className="btn btn-primary btn-sm" onClick={() => setApply({ id: r.id, done: onApplyRule(r) })}>
-                            Applica
-                          </button>
-                          <button type="button" className="btn btn-soft btn-sm" onClick={() => setApply(null)}>
-                            Annulla
-                          </button>
-                        </>
-                      ) : (
-                        <span className="setting-desc">Nessun messaggio già scaricato da cambiare.</span>
-                      )}
+                  {state && ("plan" in state || "done" in state) && (("plan" in state ? state.plan.errors : state.errors) as string[]).map((e) => (
+                    <span key={e} className="setting-desc" role="alert">
+                      Ricerca non riuscita su {e}
                     </span>
-                  )}
+                  ))}
                 </span>
                 <button type="button" className="icon-btn" aria-label="Sposta su" title="Sposta su" disabled={i === 0} onClick={() => move(i, -1)}>
                   <Icon name="arrowUp" size={15} stroke={1.8} />
@@ -855,7 +862,7 @@ function RulesSection({ rules, onRules, labels, accounts, mailboxes, draft, coun
                 <button type="button" className="icon-btn" aria-label="Sposta giù" title="Sposta giù" disabled={i === rules.length - 1} onClick={() => move(i, 1)}>
                   <Icon name="arrowDown" size={15} stroke={1.8} />
                 </button>
-                <button type="button" className="icon-btn" aria-label="Applica ora ai messaggi già scaricati" title="Applica ora ai messaggi già scaricati" onClick={() => applyNow(r)}>
+                <button type="button" className="icon-btn" aria-label="Applica ora a tutta la posta" title="Applica ora a tutta la posta, anche quella vecchia" disabled={!!state && "busy" in state} onClick={() => applyNow(r)}>
                   <Icon name="sync" size={15} stroke={1.8} />
                 </button>
                 <button type="button" className="icon-btn" aria-label="Modifica la regola" title="Modifica" aria-pressed={editingId === r.id} onClick={() => (editingId === r.id ? reset() : edit(r))}>

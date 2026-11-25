@@ -214,6 +214,16 @@ export interface Message {
   scheduled?: Scheduled;
 }
 
+/** Messaggio trovato sul server da una regola: solo quanto serve per applicarla. */
+export interface RuleHit {
+  messageId: string | null;
+  folder: Folder;
+  mailbox: string;
+  uid: number;
+  unread: boolean;
+  flagged: boolean;
+}
+
 export interface SyncReport {
   messages: Message[];
   errors: { accountId: string; message: string }[];
