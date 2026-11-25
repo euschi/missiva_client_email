@@ -404,7 +404,12 @@ async fn sync_mailbox(account: String, mailbox: String) -> Result<SyncReport> {
     })
 }
 
+/// UID massimi per comando IMAP: con le regole applicate a tutta la posta i gruppi possono
+/// contare migliaia di messaggi, e una riga di comando troppo lunga il server la rifiuta.
+const UIDS_PER_COMMAND: usize = 500;
+
 /// Messaggi raggruppati per account e casella: ogni gruppo usa una sola sessione IMAP.
+/// I gruppi molto grandi si spezzano in blocchi da `UIDS_PER_COMMAND`.
 fn by_mailbox(targets: Vec<MessageRef>) -> Vec<(MessageRef, Vec<u32>)> {
     let mut groups: Vec<(MessageRef, Vec<u32>)> = Vec::new();
     for t in targets {
@@ -417,6 +422,13 @@ fn by_mailbox(targets: Vec<MessageRef>) -> Vec<(MessageRef, Vec<u32>)> {
         }
     }
     groups
+        .into_iter()
+        .flat_map(|(target, uids)| {
+            uids.chunks(UIDS_PER_COMMAND)
+                .map(|chunk| (MessageRef { account_id: target.account_id.clone(), folder: target.folder, mailbox: target.mailbox.clone(), uid: chunk[0] }, chunk.to_vec()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -782,6 +794,14 @@ async fn gmail_label_members(account: String, label: String) -> Result<Option<im
     }
     let auth = auth_for(&acc).await?;
     blocking(move || imap_client::gmail_label_members(&acc, &auth, &label)).await
+}
+
+/// Messaggi di un account che soddisfano una regola, cercati sul server in tutta la posta.
+#[tauri::command]
+async fn rule_hits(account: String, field: String, contains: String, inbox_only: bool) -> Result<Vec<imap_client::RuleHit>> {
+    let acc = accounts::get(&account)?;
+    let auth = auth_for(&acc).await?;
+    blocking(move || imap_client::rule_hits(&acc, &auth, &field, &contains, inbox_only)).await
 }
 
 /// Il link mailto: tra gli argomenti con cui è stata avviata l'app.
@@ -1176,6 +1196,7 @@ pub fn run() {
             server_reachable,
             gmail_set_label,
             gmail_label_members,
+            rule_hits,
             initial_mailto,
             is_default_mail_client,
             set_default_mail_client,

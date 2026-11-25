@@ -3,7 +3,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { demo } from "./demo";
-import type { Account, AccountPatch, AiAgent, McpResult, McpServer, McpTool, Browser, Folder, Invite, SearchQuery, Unsubscribe, Guess, HtmlView, InlineImageFile, Mailbox, Message, Outgoing, Provider, Scheduled, Server, SyncReport } from "./types";
+import type { Account, AccountPatch, AiAgent, McpResult, McpServer, McpTool, Browser, Folder, Invite, SearchQuery, Unsubscribe, Guess, HtmlView, InlineImageFile, Mailbox, Message, Outgoing, Provider, RuleHit, Scheduled, Server, SyncReport } from "./types";
 
 export const inTauri = isTauri();
 
@@ -115,6 +115,9 @@ export const api = {
   gmailSetLabel: (ms: Message[], label: string, on: boolean): Promise<void> =>
     inTauri ? invoke("gmail_set_label", { targets: ms.map(ref), messageIds: ms.map((m) => m.messageId ?? ""), label, on }) : Promise.resolve(),
 
+  /** Messaggi dell'account che soddisfano la condizione di una regola, in tutta la posta ricevuta. */
+  ruleHits: (account: string, field: string, contains: string, inboxOnly: boolean): Promise<RuleHit[]> =>
+    inTauri ? invoke("rule_hits", { account, field, contains, inboxOnly }) : Promise.resolve([]),
   gmailLabelMembers: (account: string, label: string): Promise<{ ids: string[]; complete: boolean } | null> =>
     inTauri ? invoke("gmail_label_members", { account, label }) : Promise.resolve(null),
 

@@ -22,10 +22,10 @@ import { matchesSearch, parseMailto, parseSearch, quotedHtmlBlock, suspiciousLin
 import { listenNotificationClicks, notifyNewMail, type NotificationTarget } from "./notify";
 import { buildThreads } from "./threads";
 import { applyPrefs, loadPrefs, savePrefs, type Prefs } from "./prefs";
-import { keyOf, ruleActive, ruleMatches, useStore, type Labels, type Rule, type Snooze, type Template } from "./store";
+import { keyOf, MOVING_ACTIONS, ruleActive, ruleMatches, useStore, type RulePlan, type Labels, type Rule, type Snooze, type Template } from "./store";
 import { draftMeta, forgetDraft } from "./draftMeta";
 import { plainImages } from "./markdown";
-import type { Account, Attachment, Browser, Contact, Draft, Folder, Mailbox, Message, OpenBox, Outgoing, Scheduled, Unsubscribe } from "./types";
+import type { Account, Attachment, Browser, Contact, Draft, Folder, Mailbox, Message, OpenBox, Outgoing, RuleHit, Scheduled, Unsubscribe } from "./types";
 
 type ModalState =
   | { kind: "compose"; draft: Draft }
@@ -93,6 +93,30 @@ const SEARCH_KEY = "box:search";
 /** Messaggi vecchi caricati a mano per una cartella: la sincronizzazione non li tocca. */
 const olderKey = (listKey: string) => `box:older:${listKey}`;
 const uniqueById = (list: Message[]) => [...new Map(list.map((m) => [m.id, m])).values()];
+
+/** Messaggio mai scaricato trovato da una regola: basta per etichettarlo, segnarlo o spostarlo. */
+const hitMessage = (accountId: string, h: RuleHit): Message => ({
+  id: `hit:${accountId}:${h.mailbox}:${h.uid}`,
+  accountId,
+  folder: h.folder,
+  mailbox: h.mailbox,
+  uid: h.uid,
+  messageId: h.messageId,
+  inReplyTo: null,
+  references: [],
+  fromName: "",
+  fromEmail: "",
+  to: [],
+  cc: [],
+  subject: "",
+  snippet: "",
+  body: "",
+  date: 0,
+  unread: h.unread,
+  flagged: h.flagged,
+  attachments: [],
+  hasHtml: false,
+});
 const prefixed = (prefix: string, s: string) => (s.toLowerCase().startsWith(prefix.toLowerCase()) ? s : `${prefix} ${s}`);
 /** Intestazioni con cui Missiva apre una citazione (risposta o inoltro). */
 const QUOTE_START = /^(Il .+ <[^>\n]+> ha scritto:|---------- Messaggio inoltrato ----------)$/m;
@@ -1084,62 +1108,88 @@ export function App() {
 
   /**
    * Applica le regole ai messaggi indicati. Gli spostamenti valgono solo in posta in arrivo e una volta
-   * per messaggio: conta la prima regola che sposta. Con `dryRun` non tocca nulla e conta soltanto.
+   * per messaggio: conta la prima regola che sposta. Con `dryRun` non tocca nulla e conta soltanto;
+   * con `matched` i messaggi arrivano già filtrati dal server e non si riconfrontano.
+   * Le modifiche si raccolgono e partono insieme: anche migliaia di messaggi costano poche chiamate.
    * Restituisce i messaggi da non notificare e quanti messaggi sono cambiati.
    */
-  const applyRules = (ms: Message[], list: Rule[], dryRun = false) => {
+  const applyRules = (ms: Message[], list: Rule[], opts: { dryRun?: boolean; matched?: boolean } = {}) => {
+    const { dryRun = false, matched = false } = opts;
     const handled = new Set<string>();
     let changed = 0;
-    let current = labelsRef.current;
-    const failed = (e: unknown, m: Message) => {
-      notify(`Regola non applicata: ${errorText(e)}`, true);
-      refresh(m);
-    };
+    const { defs, byMessage: base } = labelsRef.current;
+    let byMessage: Record<string, string[]> | null = null;
+    const read: Message[] = [];
+    const star: Message[] = [];
+    const tagged = new Map<string, Message[]>();
+    const moves = new Map<string, { rule: Rule; ms: Message[] }>();
     for (const m of ms) {
       if (m.scheduled || m.id.startsWith("local:")) continue;
       let { unread, flagged } = m;
       let moved = false;
       let touched = false;
       for (const r of list) {
-        if (!ruleMatches(r, m)) continue;
+        if (!matched && !ruleMatches(r, m)) continue;
         if (r.action === "read") {
           handled.add(m.id);
           if (!unread) continue;
           unread = false;
           touched = true;
-          if (!dryRun) {
-            patchMessage(m.id, { unread: false });
-            api.setFlags(m, { seen: true }).catch((e) => failed(e, m));
-          }
+          read.push(m);
         } else if (r.action === "star") {
           if (flagged) continue;
           flagged = true;
           touched = true;
-          if (!dryRun) {
-            patchMessage(m.id, { flagged: true });
-            api.setFlags(m, { flagged: true }).catch((e) => failed(e, m));
-          }
+          star.push(m);
         } else if (r.action === "label") {
-          const def = current.defs.find((l) => l.id === r.labelId);
+          const def = defs.find((l) => l.id === r.labelId);
           const k = keyOf(m);
-          if (!def || current.byMessage[k]?.includes(def.id)) continue;
+          const now = (byMessage ?? base)[k];
+          if (!def || now?.includes(def.id)) continue;
           touched = true;
-          current = { ...current, byMessage: { ...current.byMessage, [k]: [...(current.byMessage[k] ?? []), def.id] } };
-          if (!dryRun) pushGmailLabel([m], def.name, true);
+          byMessage ??= { ...base };
+          byMessage[k] = [...(now ?? []), def.id];
+          const group = tagged.get(def.name) ?? [];
+          group.push(m);
+          tagged.set(def.name, group);
         } else if (!moved && m.folder === "inbox") {
           moved = true;
           touched = true;
           handled.add(m.id);
-          if (!dryRun) {
-            dropMessage(m.id);
-            const call = r.action === "spam" ? api.markSpam([m]) : r.action === "move" ? api.moveToMailbox([m], r.boxPath ?? "") : api.moveMessages([m], r.action);
-            call.catch((e) => failed(e, m));
-          }
+          const key = `${r.action}|${r.boxPath ?? ""}`;
+          const group = moves.get(key) ?? { rule: r, ms: [] };
+          group.ms.push(m);
+          moves.set(key, group);
         }
       }
       if (touched) changed++;
     }
-    if (!dryRun && current !== labelsRef.current) setLabels(current);
+    if (!dryRun) {
+      const failed = (e: unknown, group: Message[]) => {
+        notify(`Regola non applicata: ${errorText(e)}`, true);
+        refresh(group[0]);
+      };
+      const patchAll = (group: Message[], patch: Partial<Message>) => {
+        const ids = new Set(group.map((m) => m.id));
+        setByFolder((all) => Object.fromEntries(Object.entries(all).map(([f, l]) => [f, l?.map((m) => (ids.has(m.id) ? { ...m, ...patch } : m))])));
+      };
+      if (read.length) {
+        patchAll(read, { unread: false });
+        api.setFlagsMany(read, { seen: true }).catch((e) => failed(e, read));
+      }
+      if (star.length) {
+        patchAll(star, { flagged: true });
+        api.setFlagsMany(star, { flagged: true }).catch((e) => failed(e, star));
+      }
+      if (byMessage) setLabels({ ...labelsRef.current, byMessage });
+      for (const [name, group] of tagged) pushGmailLabel(group, name, true);
+      for (const { rule, ms: group } of moves.values()) {
+        const ids = new Set(group.map((m) => m.id));
+        setByFolder((all) => Object.fromEntries(Object.entries(all).map(([f, l]) => [f, l?.filter((m) => !ids.has(m.id))])));
+        const call = rule.action === "spam" ? api.markSpam(group) : rule.action === "move" ? api.moveToMailbox(group, rule.boxPath ?? "") : api.moveMessages(group, rule.action as "archive" | "trash");
+        call.catch((e) => failed(e, group));
+      }
+    }
     return { handled, changed };
   };
 
@@ -1149,6 +1199,41 @@ export function App() {
   /** Messaggi ricevuti già scaricati: le regole non toccano Inviati, Bozze e Cestino. */
   const loadedMessages = () =>
     uniqueById(Object.values(byFolder).flatMap((list) => list ?? [])).filter((m) => !["sent", "drafts", "trash"].includes(m.folder));
+
+  /**
+   * Prepara «Applica ora»: cerca sul server, in tutta la posta ricevuta di ogni account della regola,
+   * i messaggi che la soddisfano (solo posta in arrivo per gli spostamenti) e conta quanti cambierebbero.
+   * Nell'anteprima senza Tauri usa i messaggi scaricati.
+   */
+  const prepareRule = async (r: Rule): Promise<RulePlan> => {
+    const inboxOnly = MOVING_ACTIONS.includes(r.action);
+    const errors: string[] = [];
+    let hits: Message[];
+    if (!inTauri) {
+      hits = loadedMessages().filter((m) => ruleMatches(r, m) && (!inboxOnly || m.folder === "inbox"));
+    } else {
+      // Un messaggio già scaricato si usa com'è, così elenco e stato si aggiornano subito.
+      const loaded = new Map(Object.values(byFolder).flatMap((l) => l ?? []).map((m) => [`${m.accountId}|${m.mailbox}|${m.uid}`, m]));
+      const found = await Promise.all(
+        accounts
+          .filter((a) => !r.accountId || a.id === r.accountId)
+          .map((a) =>
+            api.ruleHits(a.id, r.field, r.contains, inboxOnly).then(
+              (list) => list.map((h) => loaded.get(`${a.id}|${h.mailbox}|${h.uid}`) ?? hitMessage(a.id, h)),
+              (e) => (errors.push(`${a.name}: ${errorText(e)}`), [] as Message[]),
+            ),
+          ),
+      );
+      // Senza Message-ID un messaggio mai scaricato non si può etichettare in modo stabile.
+      hits = found.flat().filter((m) => m.messageId || !m.id.startsWith("hit:"));
+    }
+    return {
+      total: hits.length,
+      changes: applyRules(hits, [r], { dryRun: true, matched: true }).changed,
+      errors,
+      apply: () => applyRules(hits, [r], { matched: true }).changed,
+    };
+  };
 
   /** Regola sull'etichetta proposta dal messaggio: stesso mittente, stesso account. */
   const labelRuleDraft = (m: Message): Partial<Rule> => ({
@@ -1864,8 +1949,7 @@ export function App() {
           rules={rules}
           onRules={setRules}
           ruleDraft={modal.ruleDraft}
-          countRule={(r) => applyRules(loadedMessages(), [r], true).changed}
-          onApplyRule={(r) => applyRules(loadedMessages(), [r]).changed}
+          prepareRule={prepareRule}
           mailboxes={mailboxes}
           mcpActions={mcpActions}
           onMcpActions={setMcpActions}

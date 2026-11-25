@@ -23,6 +23,10 @@ const SEARCH_PER_BOX: usize = 30;
 const SEARCH_LIMIT: usize = 100;
 /// Messaggi letti per ogni etichetta di Gmail.
 const LABEL_LIMIT: usize = 500;
+/// Tetto di sicurezza per «Applica ora» su tutta la posta di un account.
+const RULE_LIMIT: usize = 20_000;
+/// Messaggi letti per ogni FETCH di «Applica ora»: comandi corti anche con migliaia di UID.
+const RULE_CHUNK: usize = 500;
 const FETCH_ITEMS: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[])";
 
 #[derive(Clone)]
@@ -595,6 +599,95 @@ pub fn move_to_junk(acc: &Account, auth: &Auth, mailbox: &str, uids: &[u32]) -> 
     }
     let _ = s.logout();
     Ok(())
+}
+
+/// Messaggio trovato sul server da una regola: quanto basta per etichettarlo, segnarlo o spostarlo.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleHit {
+    pub message_id: Option<String>,
+    pub folder: Folder,
+    pub mailbox: String,
+    pub uid: u32,
+    pub unread: bool,
+    pub flagged: bool,
+}
+
+/// Criterio di SEARCH per la condizione di una regola, come la confronta il frontend.
+fn rule_criteria(field: &str, contains: &str) -> Option<String> {
+    let value = contains.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let q = quoted(value);
+    let text = match field {
+        "from" => format!("FROM {q}"),
+        // Il frontend guarda destinatari e copia conoscenza insieme.
+        "to" => format!("OR TO {q} CC {q}"),
+        "subject" => format!("SUBJECT {q}"),
+        _ => return None,
+    };
+    Some(if text.is_ascii() { text } else { format!("CHARSET UTF-8 {text}") })
+}
+
+/// Tutti i messaggi dell'account che soddisfano una regola, senza scaricarne il contenuto.
+/// Con `inbox_only` cerca solo in posta in arrivo; altrimenti in tutte le cartelle di posta
+/// ricevuta (niente inviati, bozze, cestino e spam), una sola copia per Message-ID.
+pub fn rule_hits(acc: &Account, auth: &Auth, field: &str, contains: &str, inbox_only: bool) -> Result<Vec<RuleHit>> {
+    let Some(criteria) = rule_criteria(field, contains) else { return Ok(Vec::new()) };
+    let boxes = list_mailboxes(acc, auth)?;
+    let targets: Vec<Mailbox> = if inbox_only {
+        boxes.into_iter().filter(|b| b.selectable && b.special == Some(Folder::Inbox)).collect()
+    } else {
+        // Posta in arrivo prima e archivio per ultimo: su Gmail vale la copia che si vede in arrivo.
+        search_targets(boxes).into_iter().filter(|b| b.special != Some(Folder::Sent)).collect()
+    };
+    let mut s = connect(acc, auth)?;
+    let mut out: Vec<RuleHit> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut failure = None;
+    let mut searched = false;
+    for b in &targets {
+        if out.len() >= RULE_LIMIT {
+            break;
+        }
+        let folder = b.special.unwrap_or(Folder::Other);
+        let found = s.select(&b.path).map_err(Into::into).and_then(|_| s.uid_search(&criteria).map_err(Into::into));
+        let found: std::collections::HashSet<u32> = match found {
+            Ok(found) => found,
+            Err(e) => {
+                failure = Some(e);
+                continue;
+            }
+        };
+        searched = true;
+        let uids = newest(found, RULE_LIMIT - out.len());
+        for chunk in uids.chunks(RULE_CHUNK) {
+            for f in s.uid_fetch(uid_set(chunk), "(UID FLAGS ENVELOPE)")?.iter() {
+                let Some(uid) = f.uid else { continue };
+                let message_id = f
+                    .envelope()
+                    .and_then(|e| e.message_id)
+                    .map(|id| String::from_utf8_lossy(id).trim().trim_start_matches('<').trim_end_matches('>').to_string());
+                if message_id.as_ref().is_some_and(|id| !seen.insert(id.clone())) {
+                    continue;
+                }
+                out.push(RuleHit {
+                    message_id,
+                    folder,
+                    mailbox: b.path.clone(),
+                    uid,
+                    unread: !f.flags().contains(&Flag::Seen),
+                    flagged: f.flags().contains(&Flag::Flagged),
+                });
+            }
+        }
+    }
+    let _ = s.logout();
+    match failure {
+        Some(e) if !searched => Err(e),
+        _ => Ok(out),
+    }
 }
 
 /// Su Gmail un'etichetta è una cartella: copiarci un messaggio gli applica l'etichetta.
