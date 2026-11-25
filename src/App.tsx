@@ -373,6 +373,7 @@ export function App() {
 
   const openBox = async (b: OpenBox) => {
     setBox(b);
+    setLabelFilter(null);
     setSelectedId(null);
     setChecked([]);
     setMenu(null);
@@ -387,6 +388,7 @@ export function App() {
 
   const changeView = (v: View) => {
     setBox(null);
+    setLabelFilter(null);
     setView(v);
     setSelectedId(null);
     setChecked([]);
@@ -409,11 +411,30 @@ export function App() {
   const searching = !!q && serverQuery?.q === q;
   const listKey = box ? boxKey(box) : folderOf(view);
   // Anche i messaggi vecchi caricati a mano, ma non nelle viste calcolate.
-  const canLoadOlder = !q && (!!box || !["flagged", "snoozed", "scheduled"].includes(view));
+  const canLoadOlder = !q && !labelFilter && (!!box || !["flagged", "snoozed", "scheduled"].includes(view));
   const older = canLoadOlder ? (byFolder[olderKey(listKey)] ?? []) : [];
+  // Un'etichetta è una vista a sé: tutti i messaggi scaricati che la portano, da qualunque cartella.
+  const labelPool = useMemo(() => {
+    const seen = new Set<string>();
+    const out: Message[] = [];
+    for (const [key, list] of Object.entries(byFolder)) {
+      if (key === SEARCH_KEY) continue;
+      for (const m of list ?? []) {
+        if (m.folder === "trash" || m.folder === "drafts" || m.scheduled) continue;
+        const k = keyOf(m);
+        if (seen.has(k) || !labels.byMessage[k]?.length) continue;
+        seen.add(k);
+        out.push(m);
+      }
+    }
+    return out.sort(byDateDesc);
+  }, [byFolder, labels.byMessage]);
+  const inLabels = labelPool.filter((m) => accountsById[m.accountId] && !isHidden(m) && !snoozeOf(m));
   const source = searching
     ? (byFolder[SEARCH_KEY] ?? [])
-    : box
+    : labelFilter
+      ? inLabels.filter((m) => labels.byMessage[keyOf(m)]?.includes(labelFilter))
+      : box
     ? uniqueById([...(byFolder[boxKey(box)] ?? []), ...older])
     : view === "scheduled"
       ? scheduled.map(scheduledMessage).sort((a, b) => a.date - b.date)
@@ -422,22 +443,20 @@ export function App() {
         : view === "inbox"
           ? uniqueById([...inbox, ...older.filter((m) => !snoozeOf(m))])
           : uniqueById([...(byFolder[folderOf(view)] ?? []), ...older]);
-  // Tutto tranne il filtro etichetta: da qui vengono anche i contatori delle etichette.
-  const unlabeled = source.filter(
+  const visible = source.filter(
     (m) =>
       accountsById[m.accountId] &&
       !isHidden(m) &&
       (box || accountFilter === "all" || m.accountId === accountFilter) &&
-      (box || searching || view !== "flagged" || m.flagged) &&
+      (box || labelFilter || searching || view !== "flagged" || m.flagged) &&
       (chip !== "unread" || m.unread) &&
       (chip !== "attach" || m.attachments.length > 0) &&
       (!q || searching || matchesSearch(m, parsedQuery)),
   );
-  const visible = labelFilter ? unlabeled.filter((m) => labels.byMessage[keyOf(m)]?.includes(labelFilter)) : unlabeled;
-  // Per etichetta, quanti messaggi si vedono cliccandola e quanti sono da leggere.
+  // Contatori delle etichette: gli stessi messaggi che si vedono aprendole, su tutti gli account.
   const labelCounts: Record<string, number> = {};
   const labelUnread: Record<string, number> = {};
-  for (const m of unlabeled) {
+  for (const m of inLabels) {
     for (const id of labels.byMessage[keyOf(m)] ?? []) {
       labelCounts[id] = (labelCounts[id] ?? 0) + 1;
       if (m.unread) labelUnread[id] = (labelUnread[id] ?? 0) + 1;
@@ -1575,15 +1594,15 @@ export function App() {
       ? `${plural(errorCount, "account", "account")} con errori`
       : relativeSync(lastSync);
 
-  const title = box ? box.mailbox.name : VIEWS.find((v) => v.id === view)!.label;
   const activeLabel = labels.defs.find((l) => l.id === labelFilter);
+  const title = activeLabel ? activeLabel.name : box ? box.mailbox.name : VIEWS.find((v) => v.id === view)!.label;
   const scope = box
     ? `${accountsById[box.accountId]?.name} · ${box.mailbox.label}`
-    : (accountFilter === "all" ? "Tutti gli account" : `${accountsById[accountFilter]?.name} · ${accountsById[accountFilter]?.email}`) +
-    (activeLabel ? ` · ${activeLabel.name}` : "");
+    : accountFilter === "all" ? "Tutti gli account" : `${accountsById[accountFilter]?.name} · ${accountsById[accountFilter]?.email}`;
   const unread = visible.filter((m) => m.unread).length;
-  const tally =
-    view === "scheduled"
+  const tally = activeLabel
+    ? `${plural(visible.length, "messaggio", "messaggi")} · ${plural(unread, "non letto", "non letti")}`
+    : view === "scheduled"
       ? plural(visible.length, "in coda", "in coda")
       : view === "snoozed"
         ? plural(visible.length, "posticipato", "posticipati")
@@ -1604,7 +1623,7 @@ export function App() {
             : view === "scheduled"
               ? { title: "Nessun invio in coda", text: "Nella finestra Scrivi usa l’orologio accanto a Invia per programmare un messaggio." }
               : activeLabel
-                ? { title: "Nessun messaggio", text: `Nessun messaggio con l’etichetta «${activeLabel.name}» in questa cartella.` }
+                ? { title: "Nessun messaggio", text: `Nessun messaggio scaricato ha l’etichetta «${activeLabel.name}».` }
                 : { title: "Tutto in ordine", text: "Non ci sono messaggi qui." };
 
   return (
@@ -1656,8 +1675,15 @@ export function App() {
           labelUnread={labelUnread}
           labelFilter={labelFilter}
           onLabelFilter={(id) => {
+            // L'etichetta vale su tutti gli account e tutte le cartelle, come il suo contatore.
             setLabelFilter(id);
+            if (id) {
+              setBox(null);
+              setAccountFilter("all");
+            }
             setSelectedId(null);
+            setChecked([]);
+            setMenu(null);
           }}
           onCompose={() => compose()}
           onAddAccount={() => setModal({ kind: "account" })}
