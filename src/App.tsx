@@ -22,7 +22,7 @@ import { matchesSearch, parseMailto, parseSearch, quotedHtmlBlock, suspiciousLin
 import { listenNotificationClicks, notifyNewMail, type NotificationTarget } from "./notify";
 import { buildThreads } from "./threads";
 import { applyPrefs, loadPrefs, savePrefs, type Prefs } from "./prefs";
-import { keyOf, useStore, type Labels, type Rule, type Snooze, type Template } from "./store";
+import { keyOf, ruleActive, ruleMatches, useStore, type Labels, type Rule, type Snooze, type Template } from "./store";
 import { draftMeta, forgetDraft } from "./draftMeta";
 import { plainImages } from "./markdown";
 import type { Account, Attachment, Browser, Contact, Draft, Folder, Mailbox, Message, OpenBox, Outgoing, Scheduled, Unsubscribe } from "./types";
@@ -460,6 +460,21 @@ export function App() {
     drafts: (byFolder.drafts ?? []).filter(known).length,
   };
   const labelCounts = Object.fromEntries(labels.defs.map((l) => [l.id, Object.values(labels.byMessage).filter((ids) => ids.includes(l.id)).length]));
+  // Da leggere per etichetta: messaggi scaricati e non letti, contati una volta sola anche se in più cartelle.
+  const labelUnread = useMemo(() => {
+    const seen = new Set<string>();
+    const out: Record<string, number> = {};
+    for (const [folder, list] of Object.entries(byFolder)) {
+      if (folder === "trash" || folder === "sent" || folder === "drafts") continue;
+      for (const m of list ?? []) {
+        const k = keyOf(m);
+        if (!m.unread || seen.has(k) || !accountsById[m.accountId]) continue;
+        seen.add(k);
+        for (const id of labels.byMessage[k] ?? []) out[id] = (out[id] ?? 0) + 1;
+      }
+    }
+    return out;
+  }, [byFolder, labels.byMessage, accountsById]);
 
   // Allo scadere del posticipo il messaggio torna in arrivo come non letto, con notifica.
   useEffect(() => {
@@ -1054,47 +1069,81 @@ export function App() {
     if (changed) setLabels({ ...current, byMessage });
   };
 
-  /** Applica le regole ai messaggi appena arrivati. Restituisce quelli da non notificare. */
-  runRulesRef.current = (added) => {
+  /**
+   * Applica le regole ai messaggi indicati. Gli spostamenti valgono solo in posta in arrivo e una volta
+   * per messaggio: conta la prima regola che sposta. Con `dryRun` non tocca nulla e conta soltanto.
+   * Restituisce i messaggi da non notificare e quanti messaggi sono cambiati.
+   */
+  const applyRules = (ms: Message[], list: Rule[], dryRun = false) => {
     const handled = new Set<string>();
-    if (!rules.length) return handled;
+    let changed = 0;
     let current = labelsRef.current;
     const failed = (e: unknown, m: Message) => {
       notify(`Regola non applicata: ${errorText(e)}`, true);
       refresh(m);
     };
-    for (const m of added) {
-      const text = (r: Rule) => (r.field === "from" ? `${m.fromName} ${m.fromEmail}` : r.field === "to" ? [...m.to, ...m.cc].map((c) => `${c.name} ${c.email}`).join(" ") : m.subject).toLowerCase();
+    for (const m of ms) {
+      if (m.scheduled || m.id.startsWith("local:")) continue;
+      let { unread, flagged } = m;
       let moved = false;
-      for (const r of rules) {
-        if ((r.accountId && r.accountId !== m.accountId) || !r.contains || !text(r).includes(r.contains.toLowerCase())) continue;
+      let touched = false;
+      for (const r of list) {
+        if (!ruleMatches(r, m)) continue;
         if (r.action === "read") {
-          patchMessage(m.id, { unread: false });
           handled.add(m.id);
-          api.setFlags(m, { seen: true }).catch((e) => failed(e, m));
-        } else if (r.action === "star") {
-          patchMessage(m.id, { flagged: true });
-          api.setFlags(m, { flagged: true }).catch((e) => failed(e, m));
-        } else if (r.action === "label" && r.labelId) {
-          const k = keyOf(m);
-          if (!current.byMessage[k]?.includes(r.labelId)) {
-            current = { ...current, byMessage: { ...current.byMessage, [k]: [...(current.byMessage[k] ?? []), r.labelId] } };
-            const def = current.defs.find((l) => l.id === r.labelId);
-            if (def) pushGmailLabel([m], def.name, true);
+          if (!unread) continue;
+          unread = false;
+          touched = true;
+          if (!dryRun) {
+            patchMessage(m.id, { unread: false });
+            api.setFlags(m, { seen: true }).catch((e) => failed(e, m));
           }
-        } else if (!moved && r.action !== "label") {
-          // Un messaggio si sposta una volta sola: vale la prima regola che lo sposta.
+        } else if (r.action === "star") {
+          if (flagged) continue;
+          flagged = true;
+          touched = true;
+          if (!dryRun) {
+            patchMessage(m.id, { flagged: true });
+            api.setFlags(m, { flagged: true }).catch((e) => failed(e, m));
+          }
+        } else if (r.action === "label") {
+          const def = current.defs.find((l) => l.id === r.labelId);
+          const k = keyOf(m);
+          if (!def || current.byMessage[k]?.includes(def.id)) continue;
+          touched = true;
+          current = { ...current, byMessage: { ...current.byMessage, [k]: [...(current.byMessage[k] ?? []), def.id] } };
+          if (!dryRun) pushGmailLabel([m], def.name, true);
+        } else if (!moved && m.folder === "inbox") {
           moved = true;
+          touched = true;
           handled.add(m.id);
-          dropMessage(m.id);
-          const call = r.action === "spam" ? api.markSpam([m]) : r.action === "move" ? api.moveToMailbox([m], r.boxPath ?? "") : api.moveMessages([m], r.action);
-          call.catch((e) => failed(e, m));
+          if (!dryRun) {
+            dropMessage(m.id);
+            const call = r.action === "spam" ? api.markSpam([m]) : r.action === "move" ? api.moveToMailbox([m], r.boxPath ?? "") : api.moveMessages([m], r.action);
+            call.catch((e) => failed(e, m));
+          }
         }
       }
+      if (touched) changed++;
     }
-    if (current !== labelsRef.current) setLabels(current);
-    return handled;
+    if (!dryRun && current !== labelsRef.current) setLabels(current);
+    return { handled, changed };
   };
+
+  /** Applica le regole attive ai messaggi appena arrivati. Restituisce quelli da non notificare. */
+  runRulesRef.current = (added) => applyRules(added, rules.filter(ruleActive)).handled;
+
+  /** Tutti i messaggi già scaricati, da qualunque cartella aperta. */
+  const loadedMessages = () => Object.values(byFolder).flatMap((list) => list ?? []);
+
+  /** Regola sull'etichetta proposta dal messaggio: stesso mittente, stesso account. */
+  const labelRuleDraft = (m: Message): Partial<Rule> => ({
+    field: "from",
+    contains: m.fromEmail,
+    accountId: m.accountId,
+    action: "label",
+    labelId: labelsRef.current.byMessage[keyOf(m)]?.[0],
+  });
 
   // ---------- Invio con tempo per annullare ----------
 
@@ -1609,6 +1658,7 @@ export function App() {
           onEmptyTrash={askEmptyTrash}
           labels={labels.defs}
           labelCounts={labelCounts}
+          labelUnread={labelUnread}
           labelFilter={labelFilter}
           onLabelFilter={(id) => {
             setLabelFilter(id);
@@ -1699,6 +1749,7 @@ export function App() {
           messageLabels={selected ? labelsOf(selected) : []}
           onToggleLabel={(m, id) => toggleLabelMany([m], id)}
           onCreateLabel={(m, name) => createLabelMany([m], name)}
+          onLabelRule={(m) => setModal({ kind: "settings", section: "rules", ruleDraft: labelRuleDraft(m) })}
           snoozedUntil={selected ? snoozeOf(selected) : undefined}
           onSnooze={snooze}
           onUnsnooze={unsnooze}
@@ -1792,6 +1843,8 @@ export function App() {
           rules={rules}
           onRules={setRules}
           ruleDraft={modal.ruleDraft}
+          countRule={(r) => applyRules(loadedMessages(), [r], true).changed}
+          onApplyRule={(r) => applyRules(loadedMessages(), [r]).changed}
           mailboxes={mailboxes}
           mcpActions={mcpActions}
           onMcpActions={setMcpActions}

@@ -71,6 +71,8 @@ interface Props {
   messageLabels: Label[];
   onToggleLabel: (m: Message, id: string) => void;
   onCreateLabel: (m: Message, name: string) => void;
+  /** Apre una regola che etichetta in automatico i messaggi di questo mittente. */
+  onLabelRule: (m: Message) => void;
   snoozedUntil: number | undefined;
   onSnooze: (m: Message, at: number) => void;
   onUnsnooze: (m: Message) => void;
@@ -153,6 +155,7 @@ export function Reader(p: Props) {
                     selected={p.messageLabels.map((l) => l.id)}
                     onToggle={(id) => p.onToggleLabel(m, id)}
                     onCreate={(name) => p.onCreateLabel(m, name)}
+                    onRule={() => (close(), p.onLabelRule(m))}
                   />
                 </Popover>
               )}
