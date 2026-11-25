@@ -48,6 +48,8 @@ interface Props {
   onEmptyTrash: (accountId: string | null) => void;
   labels: Label[];
   labelCounts: Record<string, number>;
+  /** Messaggi da leggere per etichetta (labelCounts conta tutti quelli presenti). */
+  labelUnread: Record<string, number>;
   labelFilter: string | null;
   onLabelFilter: (id: string | null) => void;
   onCompose: () => void;
@@ -159,7 +161,7 @@ export function Sidebar(p: Props) {
               <button
                 type="button"
                 className="acct-row all"
-                aria-current={!p.box && p.accountFilter === "all" && p.view === "inbox"}
+                aria-current={!p.box && !p.labelFilter && p.accountFilter === "all" && p.view === "inbox"}
                 onClick={() => p.onView("inbox")}
               >
                 <span className="stack" aria-hidden="true">
@@ -189,7 +191,7 @@ export function Sidebar(p: Props) {
                         type="button"
                         className="nav-item tree-item"
                         data-drop-folder={DROPPABLE.includes(v.id as Folder) ? v.id : undefined}
-                        aria-current={!p.box && p.accountFilter === "all" && p.view === v.id}
+                        aria-current={!p.box && !p.labelFilter && p.accountFilter === "all" && p.view === v.id}
                         onClick={() => p.onView(v.id)}
                         onContextMenu={(e) => {
                           e.preventDefault();
@@ -216,20 +218,32 @@ export function Sidebar(p: Props) {
           <div className="section-head">
             <span className="eyebrow">Etichette</span>
           </div>
-          {p.labels.map((l) => (
-            <button
-              key={l.id}
-              type="button"
-              className="nav-item"
-              aria-pressed={p.labelFilter === l.id}
-              aria-current={p.labelFilter === l.id}
-              onClick={() => p.onLabelFilter(p.labelFilter === l.id ? null : l.id)}
-            >
-              <i className="label-dot lg" style={{ background: l.color }} />
-              <span className="label">{l.name}</span>
-              <span className="count">{show(p.labelCounts[l.id])}</span>
-            </button>
-          ))}
+          {p.labels.map((l) => {
+            const unread = p.labelUnread[l.id] ?? 0;
+            const total = p.labelCounts[l.id] ?? 0;
+            return (
+              <button
+                key={l.id}
+                type="button"
+                className={unread ? "nav-item label-item unread" : "nav-item label-item"}
+                aria-pressed={p.labelFilter === l.id}
+                aria-current={p.labelFilter === l.id}
+                title={`${l.name}: ${total === 1 ? "1 messaggio" : `${total} messaggi`}${unread ? `, ${unread} da leggere` : ""}`}
+                onClick={() => p.onLabelFilter(p.labelFilter === l.id ? null : l.id)}
+              >
+                <i className="label-dot lg" style={{ background: l.color }} />
+                <span className="label">{l.name}</span>
+                {unread > 0 ? (
+                  <span className="count new">
+                    <span className="sr-only">da leggere: </span>
+                    {unread}
+                  </span>
+                ) : (
+                  <span className="count">{show(total)}</span>
+                )}
+              </button>
+            );
+          })}
         </div>
       )}
 
@@ -340,7 +354,7 @@ function AccountList(p: Props & { branches: Branches }) {
               <button
                 type="button"
                 className={error ? "acct-row error" : "acct-row"}
-                aria-current={!p.box && p.accountFilter === a.id && p.view === "inbox"}
+                aria-current={!p.box && !p.labelFilter && p.accountFilter === a.id && p.view === "inbox"}
                 onClick={() => p.onOpenFolder(a.id, "inbox")}
                 onContextMenu={(e) => {
                   e.preventDefault();

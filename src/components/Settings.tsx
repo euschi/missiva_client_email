@@ -5,7 +5,7 @@ import { Icon, type IconName } from "../icons";
 import { notificationsAllowed, notifyTest } from "../notify";
 import { SHORTCUTS } from "../shortcuts";
 import { forgetTools, joinCommand, pairsText, parsePairs, parseServersJson, splitCommand, type McpAction } from "../mcp";
-import { LABEL_COLORS, type Labels, type Rule } from "../store";
+import { LABEL_COLORS, MOVING_ACTIONS, ruleActive, type Labels, type Rule } from "../store";
 import { PRESETS, accentOf, inkFor, isHex, type Density, type Prefs, type Reader } from "../prefs";
 import { version } from "../../package.json";
 import type { Account, AccountPatch, Mailbox, McpServer } from "../types";
@@ -43,6 +43,10 @@ interface Props {
   onRules: (r: Rule[]) => void;
   /** Regola da completare, proposta dal menu di un messaggio. */
   ruleDraft?: Partial<Rule>;
+  /** Quanti messaggi già scaricati cambierebbero applicando ora la regola. */
+  countRule: (r: Rule) => number;
+  /** Applica subito la regola ai messaggi già scaricati; restituisce quanti ne ha cambiati. */
+  onApplyRule: (r: Rule) => number;
   mailboxes: Record<string, Mailbox[]>;
   mcpActions: McpAction[];
   onMcpActions: (a: McpAction[]) => void;
@@ -52,6 +56,11 @@ interface Props {
 
 export function Settings(p: Props) {
   const [section, setSection] = useState<Section>(p.section);
+  const [ruleDraft, setRuleDraft] = useState(p.ruleDraft);
+  const go = (s: Section, draft?: Partial<Rule>) => {
+    setRuleDraft(draft);
+    setSection(s);
+  };
   return (
     <Modal label="Impostazioni" onClose={p.onClose}>
       <header className="window-head">
@@ -61,7 +70,7 @@ export function Settings(p: Props) {
       <div className="split">
         <nav aria-label="Sezioni impostazioni" className="settings-nav">
           {SECTIONS.map((s) => (
-            <button key={s.id} type="button" className="nav-item" aria-current={section === s.id} onClick={() => setSection(s.id)}>
+            <button key={s.id} type="button" className="nav-item" aria-current={section === s.id} onClick={() => go(s.id)}>
               <Icon name={s.icon} size={16} stroke={1.7} />
               {s.label}
             </button>
@@ -72,8 +81,10 @@ export function Settings(p: Props) {
           {section === "accounts" && <Accounts {...p} />}
           {section === "look" && <Look prefs={p.prefs} onPrefs={p.onPrefs} />}
           {section === "mail" && <MailSection prefs={p.prefs} onPrefs={p.onPrefs} />}
-          {section === "rules" && <RulesSection rules={p.rules} onRules={p.onRules} labels={p.labels} accounts={p.accounts} mailboxes={p.mailboxes} draft={p.ruleDraft} />}
-          {section === "labels" && <LabelsSection labels={p.labels} onLabels={p.onLabels} />}
+          {section === "rules" && (
+            <RulesSection rules={p.rules} onRules={p.onRules} labels={p.labels} accounts={p.accounts} mailboxes={p.mailboxes} draft={ruleDraft} countRule={p.countRule} onApplyRule={p.onApplyRule} />
+          )}
+          {section === "labels" && <LabelsSection labels={p.labels} onLabels={p.onLabels} rules={p.rules} onRules={p.onRules} onNewRule={(labelId) => go("rules", { action: "label", labelId })} />}
           {section === "mcp" && <McpSection actions={p.mcpActions} onActions={p.onMcpActions} />}
           {section === "notifications" && <Notifications prefs={p.prefs} onPrefs={p.onPrefs} />}
           {section === "tray" && <Tray prefs={p.prefs} onPrefs={p.onPrefs} available={p.trayAvailable} />}
@@ -580,11 +591,22 @@ function Privacy({ prefs, onPrefs, onClearCache }: PrefsProps & { onClearCache: 
   );
 }
 
-function LabelsSection({ labels, onLabels }: { labels: Labels; onLabels: (l: Labels) => void }) {
+interface LabelsSectionProps {
+  labels: Labels;
+  onLabels: (l: Labels) => void;
+  rules: Rule[];
+  onRules: (r: Rule[]) => void;
+  onNewRule: (labelId: string) => void;
+}
+
+function LabelsSection({ labels, onLabels, rules, onRules, onNewRule }: LabelsSectionProps) {
   const count = (id: string) => Object.values(labels.byMessage).filter((ids) => ids.includes(id)).length;
+  const ruleCount = (id: string) => rules.filter((r) => r.action === "label" && r.labelId === id).length;
   const patch = (id: string, change: { name?: string; color?: string }) =>
     onLabels({ ...labels, defs: labels.defs.map((l) => (l.id === id ? { ...l, ...change } : l)) });
-  const remove = (id: string) =>
+  const remove = (id: string) => {
+    // Una regola che applica un'etichetta sparita non farebbe più nulla.
+    if (ruleCount(id)) onRules(rules.filter((r) => !(r.action === "label" && r.labelId === id)));
     onLabels({
       defs: labels.defs.filter((l) => l.id !== id),
       byMessage: Object.fromEntries(
@@ -593,9 +615,10 @@ function LabelsSection({ labels, onLabels }: { labels: Labels; onLabels: (l: Lab
           .filter(([, ids]) => ids.length > 0),
       ),
     });
+  };
   return (
     <>
-      <Head title="Etichette" text="Valgono per tutti gli account e si applicano dal pannello di lettura con L. Sugli account Gmail si sincronizzano con le etichette omonime; sugli altri restano su questo computer." />
+      <Head title="Etichette" text="Valgono per tutti gli account e si applicano dal pannello di lettura con L, oppure in automatico con una regola. Sugli account Gmail si sincronizzano con le etichette omonime; sugli altri restano su questo computer." />
       {labels.defs.length === 0 ? (
         <p className="setting-desc">Nessuna etichetta. Apri un messaggio e usa il pulsante Etichetta per crearne una.</p>
       ) : (
@@ -620,7 +643,13 @@ function LabelsSection({ labels, onLabels }: { labels: Labels; onLabels: (l: Lab
                     onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
                   />
                 </label>
-                <span className="setting-desc">{plural(count(l.id), "messaggio", "messaggi")}</span>
+                <span className="setting-desc">
+                  {plural(count(l.id), "messaggio", "messaggi")}
+                  {ruleCount(l.id) > 0 && ` · ${plural(ruleCount(l.id), "regola", "regole")}`}
+                </span>
+                <button type="button" className="icon-btn" aria-label={`Nuova regola automatica per ${l.name}`} title="Applica in automatico con una regola" onClick={() => onNewRule(l.id)}>
+                  <Icon name="filter" size={15} stroke={1.8} />
+                </button>
                 <button type="button" className="icon-btn" aria-label={`Elimina ${l.name}`} title="Elimina etichetta" onClick={() => remove(l.id)}>
                   <Icon name="trash" size={15} stroke={1.8} />
                 </button>
@@ -704,48 +733,144 @@ function ruleText(r: Rule, labels: Labels, accounts: Account[]) {
   return `${field} contiene «${r.contains}»: ${action}${scope}`;
 }
 
-function RulesSection({ rules, onRules, labels, accounts, mailboxes, draft }: { rules: Rule[]; onRules: (r: Rule[]) => void; labels: Labels; accounts: Account[]; mailboxes: Record<string, Mailbox[]>; draft?: Partial<Rule> }) {
+interface RulesSectionProps {
+  rules: Rule[];
+  onRules: (r: Rule[]) => void;
+  labels: Labels;
+  accounts: Account[];
+  mailboxes: Record<string, Mailbox[]>;
+  draft?: Partial<Rule>;
+  countRule: (r: Rule) => number;
+  onApplyRule: (r: Rule) => number;
+}
+
+/** Esito di "Applica ora" su una regola: conferma attesa per gli spostamenti, oppure risultato. */
+type ApplyState = { id: string; confirm: number } | { id: string; done: number } | null;
+
+function RulesSection({ rules, onRules, labels, accounts, mailboxes, draft, countRule, onApplyRule }: RulesSectionProps) {
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [field, setField] = useState<Rule["field"]>(draft?.field ?? "from");
   const [contains, setContains] = useState(draft?.contains ?? "");
-  const [action, setAction] = useState<Rule["action"]>("archive");
+  const [action, setAction] = useState<Rule["action"]>(draft?.action ?? "archive");
   const [accountId, setAccountId] = useState(draft?.accountId ?? "");
-  const [labelId, setLabelId] = useState("");
-  const [boxPath, setBoxPath] = useState("");
+  const [labelId, setLabelId] = useState(draft?.labelId ?? "");
+  const [boxPath, setBoxPath] = useState(draft?.boxPath ?? "");
+  const [apply, setApply] = useState<ApplyState>(null);
   const boxes = (mailboxes[accountId] ?? []).filter((b) => b.selectable && !b.special);
   const incomplete = !contains.trim() || (action === "label" && !labelId) || (action === "move" && (!accountId || !boxPath));
-  const add = () => {
-    const box = boxes.find((b) => b.path === boxPath);
-    onRules([
-      ...rules,
-      {
-        id: crypto.randomUUID(),
-        field,
-        contains: contains.trim(),
-        action,
-        accountId: accountId || null,
-        ...(action === "label" ? { labelId } : {}),
-        ...(action === "move" && box ? { boxPath: box.path, boxLabel: box.label } : {}),
-      },
-    ]);
+
+  const reset = () => {
+    setEditingId(null);
+    setField("from");
     setContains("");
+    setAction("archive");
+    setAccountId("");
+    setLabelId("");
+    setBoxPath("");
   };
+  const edit = (r: Rule) => {
+    setEditingId(r.id);
+    setField(r.field);
+    setContains(r.contains);
+    setAction(r.action);
+    setAccountId(r.accountId ?? "");
+    setLabelId(r.labelId ?? "");
+    setBoxPath(r.boxPath ?? "");
+    setApply(null);
+  };
+  const submit = () => {
+    const box = boxes.find((b) => b.path === boxPath);
+    const old = rules.find((r) => r.id === editingId);
+    const rule: Rule = {
+      id: old?.id ?? crypto.randomUUID(),
+      field,
+      contains: contains.trim(),
+      action,
+      accountId: accountId || null,
+      ...(action === "label" ? { labelId } : {}),
+      ...(action === "move" && box ? { boxPath: box.path, boxLabel: box.label } : {}),
+      ...(old?.enabled === false ? { enabled: false } : {}),
+    };
+    onRules(old ? rules.map((r) => (r.id === old.id ? rule : r)) : [...rules, rule]);
+    reset();
+  };
+  const patch = (id: string, change: Partial<Rule>) => onRules(rules.map((r) => (r.id === id ? { ...r, ...change } : r)));
+  const move = (i: number, by: number) => {
+    const next = [...rules];
+    [next[i], next[i + by]] = [next[i + by], next[i]];
+    onRules(next);
+  };
+  const remove = (id: string) => {
+    onRules(rules.filter((x) => x.id !== id));
+    if (editingId === id) reset();
+  };
+  const applyNow = (r: Rule) => {
+    // Spostare o cestinare posta già arrivata va confermato, e prima si dice quanta.
+    if (MOVING_ACTIONS.includes(r.action)) setApply({ id: r.id, confirm: countRule(r) });
+    else setApply({ id: r.id, done: onApplyRule(r) });
+  };
+
   return (
     <>
-      <Head title="Regole" text="Valgono per i nuovi messaggi in arrivo mentre Missiva è aperta, anche solo nell'area di notifica. I messaggi già arrivati non cambiano." />
+      <Head
+        title="Regole"
+        text="Valgono per i nuovi messaggi in arrivo mentre Missiva è aperta, anche solo nell'area di notifica, nell'ordine dell'elenco. Con «Applica ora» una regola agisce anche sui messaggi già scaricati."
+      />
       {rules.length > 0 && (
         <div className="settings-list">
-          {rules.map((r) => (
-            <div key={r.id} className="setting-row">
-              <span className="setting-text">{ruleText(r, labels, accounts)}</span>
-              <button type="button" className="icon-btn" aria-label="Elimina la regola" title="Elimina" onClick={() => onRules(rules.filter((x) => x.id !== r.id))}>
-                <Icon name="trash" size={15} stroke={1.8} />
-              </button>
-            </div>
-          ))}
+          {rules.map((r, i) => {
+            const on = ruleActive(r);
+            const state = apply?.id === r.id ? apply : null;
+            return (
+              <div key={r.id} className={editingId === r.id ? "setting-row rule-row editing" : "setting-row rule-row"}>
+                <input type="checkbox" role="switch" className="switch" aria-label="Regola attiva" title={on ? "Attiva: clic per sospenderla" : "Sospesa: clic per attivarla"} checked={on} onChange={(e) => patch(r.id, { enabled: e.target.checked ? undefined : false })} />
+                <span className={on ? "setting-text" : "setting-text muted"}>
+                  {ruleText(r, labels, accounts)}
+                  {state && "done" in state && (
+                    <span className="setting-desc" role="status">
+                      {state.done ? `Applicata a ${plural(state.done, "messaggio", "messaggi")} già scaricati.` : "Nessun messaggio già scaricato da cambiare."}
+                    </span>
+                  )}
+                  {state && "confirm" in state && (
+                    <span className="rule-confirm" role="status">
+                      {state.confirm ? (
+                        <>
+                          <span className="setting-desc">Coinvolge {plural(state.confirm, "messaggio", "messaggi")} in posta in arrivo.</span>
+                          <button type="button" className="btn btn-primary btn-sm" onClick={() => setApply({ id: r.id, done: onApplyRule(r) })}>
+                            Applica
+                          </button>
+                          <button type="button" className="btn btn-soft btn-sm" onClick={() => setApply(null)}>
+                            Annulla
+                          </button>
+                        </>
+                      ) : (
+                        <span className="setting-desc">Nessun messaggio già scaricato da cambiare.</span>
+                      )}
+                    </span>
+                  )}
+                </span>
+                <button type="button" className="icon-btn" aria-label="Sposta su" title="Sposta su" disabled={i === 0} onClick={() => move(i, -1)}>
+                  <Icon name="arrowUp" size={15} stroke={1.8} />
+                </button>
+                <button type="button" className="icon-btn" aria-label="Sposta giù" title="Sposta giù" disabled={i === rules.length - 1} onClick={() => move(i, 1)}>
+                  <Icon name="arrowDown" size={15} stroke={1.8} />
+                </button>
+                <button type="button" className="icon-btn" aria-label="Applica ora ai messaggi già scaricati" title="Applica ora ai messaggi già scaricati" onClick={() => applyNow(r)}>
+                  <Icon name="sync" size={15} stroke={1.8} />
+                </button>
+                <button type="button" className="icon-btn" aria-label="Modifica la regola" title="Modifica" aria-pressed={editingId === r.id} onClick={() => (editingId === r.id ? reset() : edit(r))}>
+                  <Icon name="pen" size={15} stroke={1.8} />
+                </button>
+                <button type="button" className="icon-btn" aria-label="Elimina la regola" title="Elimina" onClick={() => remove(r.id)}>
+                  <Icon name="trash" size={15} stroke={1.8} />
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
-      <form className="rule-form" onSubmit={(e) => (e.preventDefault(), !incomplete && add())}>
-        <span className="setting-title">Nuova regola</span>
+      <form className="rule-form" onSubmit={(e) => (e.preventDefault(), !incomplete && submit())}>
+        <span className="setting-title">{editingId ? "Modifica regola" : "Nuova regola"}</span>
         <div className="grid-2">
           <label className="field">
             <span>Se</span>
@@ -774,7 +899,7 @@ function RulesSection({ rules, onRules, labels, accounts, mailboxes, draft }: { 
             <label className="field">
               <span>Etichetta</span>
               <select className="input" value={labelId} onChange={(e) => setLabelId(e.target.value)}>
-                <option value="">Scegli…</option>
+                <option value="">{labels.defs.length ? "Scegli…" : "Nessuna etichetta: creane una dal messaggio"}</option>
                 {labels.defs.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
               </select>
             </label>
@@ -791,9 +916,14 @@ function RulesSection({ rules, onRules, labels, accounts, mailboxes, draft }: { 
         </div>
         <div>
           <button type="submit" className="btn btn-soft btn-sm" disabled={incomplete}>
-            <Icon name="plus" size={14} stroke={2} />
-            Aggiungi regola
+            <Icon name={editingId ? "check" : "plus"} size={14} stroke={2} />
+            {editingId ? "Salva modifiche" : "Aggiungi regola"}
           </button>
+          {editingId && (
+            <button type="button" className="btn btn-soft btn-sm" onClick={reset}>
+              Annulla
+            </button>
+          )}
         </div>
       </form>
     </>

@@ -34,6 +34,20 @@ export interface Rule {
   /** Cartella di destinazione per "move": percorso IMAP e nome leggibile. */
   boxPath?: string;
   boxLabel?: string;
+  /** Falso quando la regola è sospesa; assente vale attiva. */
+  enabled?: boolean;
+}
+
+/** Azioni che tolgono il messaggio dalla posta in arrivo. */
+export const MOVING_ACTIONS: Rule["action"][] = ["archive", "trash", "spam", "move"];
+
+export const ruleActive = (r: Rule) => r.enabled !== false;
+
+/** Vero se il messaggio soddisfa la condizione della regola (account compreso). */
+export function ruleMatches(r: Rule, m: Message): boolean {
+  if ((r.accountId && r.accountId !== m.accountId) || !r.contains) return false;
+  const text = r.field === "from" ? `${m.fromName} ${m.fromEmail}` : r.field === "to" ? [...m.to, ...m.cc].map((c) => `${c.name} ${c.email}`).join(" ") : m.subject;
+  return text.toLowerCase().includes(r.contains.toLowerCase());
 }
 
 /** Modello di messaggio riutilizzabile. */
