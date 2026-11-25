@@ -43,6 +43,18 @@ export const MOVING_ACTIONS: Rule["action"][] = ["archive", "trash", "spam", "mo
 
 export const ruleActive = (r: Rule) => r.enabled !== false;
 
+/** Esito della ricerca di «Applica ora», da confermare prima di applicarlo. */
+export interface RulePlan {
+  /** Messaggi trovati che soddisfano la regola. */
+  total: number;
+  /** Quanti cambierebbero davvero (gli altri hanno già l'etichetta, sono già letti…). */
+  changes: number;
+  /** Account in cui la ricerca non è riuscita, con il motivo. */
+  errors: string[];
+  /** Applica la regola ai messaggi trovati; restituisce quanti ne ha cambiati. */
+  apply: () => number;
+}
+
 /** Vero se il messaggio soddisfa la condizione della regola (account compreso). */
 export function ruleMatches(r: Rule, m: Message): boolean {
   if ((r.accountId && r.accountId !== m.accountId) || !r.contains) return false;
