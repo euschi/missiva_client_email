@@ -285,6 +285,23 @@ export function App() {
     }
   }, [notify]);
 
+  /**
+   * Su Gmail un'etichetta è anche una cartella: aprendo la vista dell'etichetta se ne scaricano i
+   * messaggi in sottofondo, come aprendo la cartella, così la vista e il contatore li mostrano subito.
+   */
+  const loadLabelBoxes = (name: string) => {
+    for (const a of accounts) {
+      if (a.provider !== "google") continue;
+      const mb = mailboxes[a.id]?.find((b) => b.selectable && !b.special && b.label.split(" / ").join("/") === name);
+      if (!mb) continue;
+      const b: OpenBox = { accountId: a.id, mailbox: mb };
+      api
+        .cachedMailbox(a.id, mb.path)
+        .then((cached) => setByFolder((all) => ({ ...all, [boxKey(b)]: all[boxKey(b)] ?? cached.sort(byDateDesc) })), () => {})
+        .finally(() => syncBox(b, true));
+    }
+  };
+
   /** Cartelle dell'utente: prima dalla cache (subito), poi aggiornate dal server. */
   const loadMailboxes = useCallback((list: Account[]) => {
     for (const a of list) {
@@ -1765,6 +1782,8 @@ export function App() {
             if (id) {
               setBox(null);
               setAccountFilter("all");
+              const def = labels.defs.find((l) => l.id === id);
+              if (def) loadLabelBoxes(def.name);
             }
             setSelectedId(null);
             setChecked([]);
